@@ -1,0 +1,74 @@
+---
+title: "2025dsa_Final_Project_group2"
+format: html
+  html:
+    embed-resources: true
+    toc: true
+    theme: cerulean
+author: Madelyn Willis, Charles Appolon
+---
+# 1. packages + data
+
+```{r  Packages}
+library(tidyverse)
+library(USAboundaries) # for US state boundaries
+library(sf) # for US map
+library(daymetr)
+library(dplyr)
+```
+
+
+
+# 1a. Data Pull
+
+```{r 1. data pull}
+
+train_meta <- read.csv("../data/training/training_meta.csv")
+
+train_soil <- read.csv("../data/training/training_soil.csv")
+
+train_trait <- read.csv("../data/training/training_trait.csv")
+
+```
+
+## 1b. Data Wrangling
+
+```{r 2. Data wrangling}
+
+#combining data frames:
+
+train_meta$year_site <- paste0(train_meta$site, "_", train_meta$year)
+train_trait$year_site <- paste0(train_trait$site, "_", train_trait$year)
+train_trait <- left_join(train_trait, train_meta, by = "year_site")
+train_soil$year_site <- paste0(train_soil$site)
+df <- left_join(train_trait, train_soil, by = "year_site") %>%
+  select(-c("year.x", "year.y"))
+
+uyear <- unique(df$year.x)
+
+nsite <- unique(df$site.x)
+```
+
+```{r}
+
+#downloading weather data
+daymet_all <- df %>%
+  mutate(weather = pmap(list(.y = year.y,
+                            .site = site.x,
+                            .lat = latitude,
+                            .lon = longitude),
+                       function(.y, .site,.lat,.lon)
+                         download_daymet(
+                           site = .site,
+                           lat = .lat,
+                           lon = .lon,
+                           start = .y,
+                           end = .y,
+                           simplify = T,
+                           silent = T) %>%
+                         rename(.year = year,
+                                .site = site)
+                       ))
+```
+
+

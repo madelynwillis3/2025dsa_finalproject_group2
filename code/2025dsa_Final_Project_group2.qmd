@@ -15,6 +15,8 @@ library(USAboundaries) # for US state boundaries
 library(sf) # for US map
 library(daymetr)
 library(dplyr)
+library(purrr)
+library(janitor)
 ```
 
 
@@ -26,8 +28,27 @@ library(dplyr)
 train_meta <- read.csv("../data/training/training_meta.csv")
 
 train_soil <- read.csv("../data/training/training_soil.csv")
+#soil does not have 2014 data
 
 train_trait <- read.csv("../data/training/training_trait.csv")
+
+daymet_all <- train_meta %>%
+  mutate(weather = pmap(list(.y = year,
+                            .site = site,
+                            .lat = latitude,
+                            .lon = longitude),
+                       function(.y, .site,.lat,.lon)
+                         try({
+                           download_daymet(
+                           site = .site,
+                           lat = .lat,
+                           lon = .lon,
+                           start = .y,
+                           end = .y,
+                           simplify = T,
+                           silent = T)})))
+
+
 
 ```
 
@@ -35,40 +56,109 @@ train_trait <- read.csv("../data/training/training_trait.csv")
 
 ```{r 2. Data wrangling}
 
-#combining data frames:
+daymet_all_w <- daymet_all %>%
+  filter(!map_lgl(weather, inherits, "try-error")) %>%
+  unnest(weather, names_sep = "_") %>%
+  group_by(
+    site,
+    year,
+    yday = weather_yday,
+    weather_measurement,
+    latitude = weather_latitude,
+    longitude = weather_longitude,
+    altitude = weather_altitude
+  ) %>%
+  summarise(
+    value = mean(weather_value, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  pivot_wider(
+    names_from = weather_measurement,
+    values_from = value
+  ) %>%
+  clean_names()
+ 
+ daymet_all_w %>%
+  # Selecting needed variables
+  dplyr::select(year, site, latitude, longitude,
+                yday,
+                dayl.s = dayl_s, 
+                prcp.mm = prcp_mm_day,
+                srad.wm2 = srad_w_m_2, 
+                tmax.c = tmax_deg_c, 
+                tmin.c = tmin_deg_c,
+                vp.pa = vp_pa
+                ) 
 
-train_meta$year_site <- paste0(train_meta$site, "_", train_meta$year)
-train_trait$year_site <- paste0(train_trait$site, "_", train_trait$year)
-train_trait <- left_join(train_trait, train_meta, by = "year_site")
-train_soil$year_site <- paste0(train_soil$site)
-df <- left_join(train_trait, train_soil, by = "year_site") %>%
-  select(-c("year.x", "year.y"))
 
-uyear <- unique(df$year.x)
 
-nsite <- unique(df$site.x)
+write.csv(daymet_all_w, "../data/training/training_weather.csv")
+
+
+```
+
+```{r feature eng}
+training_weather<- read.csv("../data/training/training_weather.csv")
+
+training_weather %>%
+  pivot_longer(cols = dayl_s:vp_pa) %>%
+  ggplot(aes(x = value)) + 
+  geom_density() +
+  facet_wrap(.~name, scales = "free")
+
+#this is where i ended for the day: 4/15
+training_weather <- training_weather %>%
+  mutate(date_chr = paste0(year, "/", yday)) %>%
+  mutate(date = as.Date(date_chr,"%Y/%j")) %>%
+  mutate(month = month(date))
+  #mutate(month_abb = month(date, label = T))
+
+training_weather <- training_weather %>%
+  group_by(year, site, month) %>%
+  summarise(across(.cols = c(dayl_s,
+                             srad_w_m_2,
+                             tmax_deg_c,
+                             tmin_deg_c,
+                             vp_pa),
+                   .fns = mean,
+                   .names = "mean_{.col}") )
+
+
+```
+
+
+```{r Map of US}
+states <- us_states() %>% 
+  filter(!(state_abbr %in% c("PR", "AK", "HI"))) #! excludes PR, AK, and HI
+ggplot() +
+  geom_sf(data = states) +
+  geom_point(data = training_weather,
+             aes(x = longitude,
+                 y = latitude))
+
+
 ```
 
 ```{r}
 
-#downloading weather data
-daymet_all <- df %>%
-  mutate(weather = pmap(list(.y = year.y,
-                            .site = site.x,
-                            .lat = latitude,
-                            .lon = longitude),
-                       function(.y, .site,.lat,.lon)
-                         download_daymet(
-                           site = .site,
-                           lat = .lat,
-                           lon = .lon,
-                           start = .y,
-                           end = .y,
-                           simplify = T,
-                           silent = T) %>%
-                         rename(.year = year,
-                                .site = site)
-                       ))
+
+
+#combining data frames:
+
+# train_meta$year_site <- paste0(train_meta$site, "_", train_meta$year)
+# train_trait$year_site <- paste0(train_trait$site, "_", train_trait$year)
+# train_trait <- left_join(train_trait, train_meta, by = "year_site")
+# train_soil$year_site <- paste0(train_soil$site)
+#  df <- left_join(train_trait, train_soil, by = "year_site") #%>%
+# #   select(-c("year.x", "year.y"))
+# na.omit(df[1:15])
+#  
+#  
+# uyear <- unique(df$year.x)
+# 
+# nsite <- unique(df$site.x)
+
+
 ```
 
 

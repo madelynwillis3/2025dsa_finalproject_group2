@@ -9,16 +9,16 @@ for **CRSS 8030 - Data Science and Stats Programming Applied to Ag**, Spring Sem
 
 **Goal of this project**: Train machine learning models using training data described below to predict yield on a test data (see details below).
 
-**Background information**: You are being provided with a **corn variety trial** data set.  
+**Background information**: We were provided with a **corn variety trial** data set.  
 This data contains over **164,000 rows** spanning **10 years** (2014-2023), **45 sites** across the USA, for a total of **270** site-years, where over **5,000** corn hybrids were evaluated.  
 
-You are being provided with the following **training data** for years 2014-2023:   
+We were provided with the following **training data** for years 2014-2023:   
 
   - Trait information (including site, year, hybrid, yield, and grain moisture)  
   - Meta information (including site, year, previous crop, longitude, and latitude)  
   - Soil information (including site, year, soil pH, soil organic matter, soil P, soil K)  
 
-You are also being provided with the following **testing data** for year 2024:  
+We were provided with the following **testing data** for year 2024:  
   - Submission information (site, year, hybrid, **no yield**)  
   - Meta information (same as training)  
   - Soil information (same as training)  

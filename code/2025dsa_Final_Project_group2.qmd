@@ -49,7 +49,6 @@ daymet_all <- train_meta %>%
                            silent = T)})))
 
 
-
 ```
 
 ## 1b. Data Wrangling

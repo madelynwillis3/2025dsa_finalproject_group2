@@ -5,7 +5,7 @@ format:
     embed-resources: true
     toc: true
     theme: cerulean
-author: FIRST LAST
+author: Madelyn Willis / Charles Appolon 
 ---
 
 # A. Introduction  

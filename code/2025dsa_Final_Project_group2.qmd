@@ -17,6 +17,7 @@ library(daymetr)
 library(dplyr)
 library(purrr)
 library(janitor)
+library(ggridges)
 ```
 
 
@@ -54,7 +55,7 @@ daymet_all <- train_meta %>%
 ## 1b. Data Wrangling
 
 ```{r 2. Data wrangling}
-
+#gathering data: dropping data that doesn't work within daymet boundaries.
 daymet_all_w <- daymet_all %>%
   filter(!map_lgl(weather, inherits, "try-error")) %>%
   unnest(weather, names_sep = "_") %>%
@@ -105,23 +106,54 @@ training_weather %>%
   geom_density() +
   facet_wrap(.~name, scales = "free")
 
-#this is where i ended for the day: 4/15
+
 training_weather <- training_weather %>%
   mutate(date_chr = paste0(year, "/", yday)) %>%
   mutate(date = as.Date(date_chr,"%Y/%j")) %>%
-  mutate(month = month(date))
-  #mutate(month_abb = month(date, label = T))
+  mutate(month = month(date)) %>%
+  mutate(month_abb = month(date, label = T))
 
-training_weather <- training_weather %>%
-  group_by(year, site, month) %>%
-  summarise(across(.cols = c(dayl_s,
-                             srad_w_m_2,
-                             tmax_deg_c,
-                             tmin_deg_c,
-                             vp_pa),
-                   .fns = mean,
-                   .names = "mean_{.col}") )
+training_weather_fe <- training_weather %>%
+  mutate(month_abb = month(date, label = TRUE)) %>%
+  group_by(year, site, month, month_abb) %>%  # include month_abb here
+  summarise(
+    across(.cols = c(dayl_s, srad_w_m_2, tmax_deg_c, tmin_deg_c, vp_pa),
+           .fns = mean,
+           .names = "mean_{.col}"),
+    across(.cols = prcp_mm_day,
+           .fns = sum,
+           .names = "sum_{.col}")
+  ) %>%
+  ungroup()
 
+
+training_weather_wide <- training_weather_fe %>%
+  filter(month >= 3 & month <= 10) %>% #filtering by planting to harvest months 
+  pivot_longer(cols = mean_dayl_s:sum_prcp_mm_day) %>%
+  mutate(varname = paste0(name, "_", month_abb)) %>%
+  dplyr::select(-name, -month_abb) %>%
+  pivot_wider(names_from = varname,
+              values_from = value) %>%
+  mutate(across(c(4:50), ~round(.,1)))
+
+ggplot(data = training_weather_fe,
+       aes(x = mean_tmax_deg_c,
+           y = month_abb,
+           fill = stat(x))) +
+  geom_density_ridges_gradient(scale = 3,
+                               rel_min_height = 0.01) +
+  scale_fill_viridis_c(option = "D") + 
+  theme(legend.position = "none")
+
+write_csv(training_weather_wide, "../data/training/training_weather_monthsum.csv")
+
+
+
+
+```
+
+
+```{r}
 
 ```
 
@@ -139,25 +171,55 @@ ggplot() +
 ```
 
 ```{r}
-
-
-
 #combining data frames:
 
-# train_meta$year_site <- paste0(train_meta$site, "_", train_meta$year)
-# train_trait$year_site <- paste0(train_trait$site, "_", train_trait$year)
-# train_trait <- left_join(train_trait, train_meta, by = "year_site")
-# train_soil$year_site <- paste0(train_soil$site)
-#  df <- left_join(train_trait, train_soil, by = "year_site") #%>%
-# #   select(-c("year.x", "year.y"))
-# na.omit(df[1:15])
-#  
-#  
-# uyear <- unique(df$year.x)
-# 
-# nsite <- unique(df$site.x)
+train_meta$year_site <- paste0(train_meta$site, "_", train_meta$year)
+train_trait$year_site <- paste0(train_trait$site, "_", train_trait$year)
+train_trait <- left_join(train_trait, train_meta, by = "year_site")
+train_soil$year_site <- paste0(train_soil$site)
+
+df <- left_join(train_trait, train_soil, by = "year_site") %>%
+   select(-c("year.y", "site.y"))
+na.omit(df[1:15])
+
+
+uyear <- unique(df$year.x)
+
+nsite <- unique(df$site.x)
+
+
+df$previous_crop <- as.factor(df$previous_crop )
+df <- df %>%
+  mutate(previous_crop_clean = tolower(previous_crop),  # make everything lowercase
+         previous_crop_clean = case_when(
+           str_detect(previous_crop_clean, "soy") ~ "soybean",
+           str_detect(previous_crop_clean, "corn") ~ "corn",
+           str_detect(previous_crop_clean, "cotton") ~ "cotton",
+           str_detect(previous_crop_clean, "wheat") ~ "wheat",
+           str_detect(previous_crop_clean, "sorghum") ~ "sorghum",
+           str_detect(previous_crop_clean, "rye") ~ "rye",
+           str_detect(previous_crop_clean, "peanut") ~ "peanut",
+           str_detect(previous_crop_clean, "beet") ~ "sugar beet",
+           str_detect(previous_crop_clean, "fallow") ~ "fallow",
+           str_detect(previous_crop_clean, "lima bean") ~ "lima bean",
+           str_detect(previous_crop_clean, "pumpkin") ~ "soybean/pumpkin", # keep as soybean if mixed
+           str_detect(previous_crop_clean, "small grain") ~ "small grain",
+           TRUE ~ "other"  # catch-all for remaining mess
+         )) %>%
+  mutate(yield_mg_ha_adj = yield_mg_ha * ((100 - grain_moisture) / (100 - 15.5)))
+
+
 
 
 ```
+
+```{r}
+training_weather_wide %>%
+  mutate(year_site = paste0(training_weather_wide$site, "_", training_weather_wide$year))
+
+df_full <- df %>%
+  left_join(training_weather_wide, by = c("site_year"))
+```
+
 
 

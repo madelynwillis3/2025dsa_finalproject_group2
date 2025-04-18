@@ -153,10 +153,6 @@ write_csv(training_weather_wide, "../data/training/training_weather_monthsum.csv
 ```
 
 
-```{r}
-
-```
-
 
 ```{r Map of US}
 states <- us_states() %>% 
@@ -172,7 +168,6 @@ ggplot() +
 
 ```{r}
 #combining data frames:
-
 train_meta$year_site <- paste0(train_meta$site, "_", train_meta$year)
 train_trait$year_site <- paste0(train_trait$site, "_", train_trait$year)
 train_trait <- left_join(train_trait, train_meta, by = "year_site")
@@ -192,19 +187,20 @@ df$previous_crop <- as.factor(df$previous_crop )
 df <- df %>%
   mutate(previous_crop_clean = tolower(previous_crop),  # make everything lowercase
          previous_crop_clean = case_when(
+           is.na(previous_crop_clean) ~ NA_character_,
            str_detect(previous_crop_clean, "soy") ~ "soybean",
            str_detect(previous_crop_clean, "corn") ~ "corn",
            str_detect(previous_crop_clean, "cotton") ~ "cotton",
-           str_detect(previous_crop_clean, "wheat") ~ "wheat",
+           str_detect(previous_crop_clean, "wheat") ~ "small grain",
            str_detect(previous_crop_clean, "sorghum") ~ "sorghum",
-           str_detect(previous_crop_clean, "rye") ~ "rye",
+           str_detect(previous_crop_clean, "rye") ~ "small grain",
            str_detect(previous_crop_clean, "peanut") ~ "peanut",
            str_detect(previous_crop_clean, "beet") ~ "sugar beet",
            str_detect(previous_crop_clean, "fallow") ~ "fallow",
            str_detect(previous_crop_clean, "lima bean") ~ "lima bean",
            str_detect(previous_crop_clean, "pumpkin") ~ "soybean/pumpkin", # keep as soybean if mixed
            str_detect(previous_crop_clean, "small grain") ~ "small grain",
-           TRUE ~ "other"  # catch-all for remaining mess
+           TRUE ~ "other"  # catch-all for remaining crops
          )) %>%
   mutate(yield_mg_ha_adj = yield_mg_ha * ((100 - grain_moisture) / (100 - 15.5)))
 
@@ -214,11 +210,27 @@ df <- df %>%
 ```
 
 ```{r}
-training_weather_wide %>%
-  mutate(year_site = paste0(training_weather_wide$site, "_", training_weather_wide$year))
+# Add site_year to both data frames and store them
+training_weather_wide <- read_csv("../data/training/training_weather_monthsum.csv")
 
+training_weather_wide <- training_weather_wide %>%
+  mutate(site_year = paste0(site, "_", year))
+
+df <- df %>%
+  mutate(site_year = paste0(site.x, "_", year.x))
+
+# summarize weather data to 1 row per site_year
+training_weather_wide_summary <- training_weather_wide %>%
+  select(-month) %>%  # exclude 'month' before summarizing
+  group_by(site_year) %>%
+  summarise(across(where(is.numeric), mean, na.rm = TRUE), .groups = "drop")
+
+
+# join summarized weather data with df
 df_full <- df %>%
-  left_join(training_weather_wide, by = c("site_year"))
+  left_join(training_weather_wide_summary, by = "site_year") %>%
+  select(-c(df_full$year.x.x,df_full$))
+
 ```
 
 

@@ -7,9 +7,10 @@ format: html
     theme: cerulean
 author: Madelyn Willis, Charles Appolon
 ---
-# 1. packages + data
 
-```{r  Packages}
+## 1. Packages
+
+```{r - load packages, warning = FALSe}
 library(tidyverse)
 library(USAboundaries) # for US state boundaries
 library(sf) # for US map
@@ -18,13 +19,18 @@ library(dplyr)
 library(purrr)
 library(janitor)
 library(ggridges)
+library(GGally)
+library(tidymodels)
+library(xgboost)
+library(finetune)  # for tune_race_anova
+library(vip) 
 ```
 
 
 
-# 1a. Data Pull
+## 1a. Data Pull
 
-```{r 1. data pull}
+```{r - train data pull}
 
 train_meta <- read.csv("../data/training/training_meta.csv")
 
@@ -33,28 +39,42 @@ train_soil <- read.csv("../data/training/training_soil.csv")
 
 train_trait <- read.csv("../data/training/training_trait.csv")
 
-daymet_all <- train_meta %>%
-  mutate(weather = pmap(list(.y = year,
-                            .site = site,
-                            .lat = latitude,
-                            .lon = longitude),
-                       function(.y, .site,.lat,.lon)
-                         try({
-                           download_daymet(
-                           site = .site,
-                           lat = .lat,
-                           lon = .lon,
-                           start = .y,
-                           end = .y,
-                           simplify = T,
-                           silent = T)})))
+
+train_meta$year_site <- paste0(train_meta$site, "_", train_meta$year)
+train_trait$year_site <- paste0(train_trait$site, "_", train_trait$year)
+train_trait <- left_join(train_trait, train_meta, by = "year_site")
+
+# Get unique combinations to avoid pulling redundant data
+unique_site_years <- train_meta %>%
+  distinct(site, year, latitude, longitude)
+
+# # Pull weather data only once per site
+# daymet_all <- unique_site_years %>%
+#   mutate(weather = pmap(list(.y = year,
+#                              .site = site,
+#                              .lat = latitude,
+#                              .lon = longitude),
+#                         function(.y, .site, .lat, .lon)
+#                           try({
+#                             download_daymet(
+#                               site = .site,
+#                               lat = .lat,
+#                               lon = .lon,
+#                               start = .y,
+#                               end = .y,
+#                               simplify = TRUE,
+#                               silent = TRUE
+#                             )
+#                           })))
+
+
 
 
 ```
 
 ## 1b. Data Wrangling
 
-```{r 2. Data wrangling}
+```{r - wrangle weather data}
 #gathering data: dropping data that doesn't work within daymet boundaries.
 daymet_all_w <- daymet_all %>%
   filter(!map_lgl(weather, inherits, "try-error")) %>%
@@ -90,14 +110,13 @@ daymet_all_w <- daymet_all %>%
                 vp.pa = vp_pa
                 ) 
 
-
-
 write.csv(daymet_all_w, "../data/training/training_weather.csv")
 
 
 ```
 
-```{r feature eng}
+## 2. Feature Engineering
+```{r - fe weather}
 training_weather<- read.csv("../data/training/training_weather.csv")
 
 training_weather %>%
@@ -111,10 +130,9 @@ training_weather <- training_weather %>%
   mutate(date_chr = paste0(year, "/", yday)) %>%
   mutate(date = as.Date(date_chr,"%Y/%j")) %>%
   mutate(month = month(date)) %>%
-  mutate(month_abb = month(date, label = T))
+  mutate(month_abb = format(date, "%b"))
 
 training_weather_fe <- training_weather %>%
-  mutate(month_abb = month(date, label = TRUE)) %>%
   group_by(year, site, month, month_abb) %>%  # include month_abb here
   summarise(
     across(.cols = c(dayl_s, srad_w_m_2, tmax_deg_c, tmin_deg_c, vp_pa),
@@ -154,24 +172,14 @@ write_csv(training_weather_wide, "../data/training/training_weather_monthsum.csv
 
 
 
-```{r Map of US}
-states <- us_states() %>% 
-  filter(!(state_abbr %in% c("PR", "AK", "HI"))) #! excludes PR, AK, and HI
-ggplot() +
-  geom_sf(data = states) +
-  geom_point(data = training_weather,
-             aes(x = longitude,
-                 y = latitude))
 
 
-```
-
-```{r}
+```{r - combine datasets}
 #combining data frames:
-train_meta$year_site <- paste0(train_meta$site, "_", train_meta$year)
-train_trait$year_site <- paste0(train_trait$site, "_", train_trait$year)
-train_trait <- left_join(train_trait, train_meta, by = "year_site")
-train_soil$year_site <- paste0(train_soil$site)
+
+
+train_soil <- train_soil %>%
+  rename(year_site = site)
 
 df <- left_join(train_trait, train_soil, by = "year_site") %>%
    select(-c("year.y", "site.y"))
@@ -185,8 +193,8 @@ nsite <- unique(df$site.x)
 
 df$previous_crop <- as.factor(df$previous_crop )
 df <- df %>%
-  mutate(previous_crop_clean = tolower(previous_crop),  # make everything lowercase
-         previous_crop_clean = case_when(
+  mutate(previous_crop_clean = tolower(previous_crop)) %>%
+  mutate(previous_crop_clean = case_when(
            is.na(previous_crop_clean) ~ NA_character_,
            str_detect(previous_crop_clean, "soy") ~ "soybean",
            str_detect(previous_crop_clean, "corn") ~ "corn",
@@ -198,12 +206,11 @@ df <- df %>%
            str_detect(previous_crop_clean, "beet") ~ "sugar beet",
            str_detect(previous_crop_clean, "fallow") ~ "fallow",
            str_detect(previous_crop_clean, "lima bean") ~ "lima bean",
-           str_detect(previous_crop_clean, "pumpkin") ~ "soybean/pumpkin", # keep as soybean if mixed
+           str_detect(previous_crop_clean, "pumpkin") ~ "soybean/pumpkin", #mixed
            str_detect(previous_crop_clean, "small grain") ~ "small grain",
-           TRUE ~ "other"  # catch-all for remaining crops
+           TRUE ~ "other"  # if theres any other
          )) %>%
   mutate(yield_mg_ha_adj = yield_mg_ha * ((100 - grain_moisture) / (100 - 15.5)))
-
 
 
 
@@ -229,7 +236,105 @@ training_weather_wide_summary <- training_weather_wide %>%
 # join summarized weather data with df
 df_full <- df %>%
   left_join(training_weather_wide_summary, by = "site_year") %>%
-  select(-c(df_full$year.x.x,df_full$))
+  select(-c("year.x.x", "previous_crop", "year.y"))
+
+```
+
+
+```{r EDA}
+
+library(stringr)
+# Step 1: Create a lookup table of lat/lon for non-missing coordinates by actual site
+coord_lookup <- df_full %>%
+  filter(!is.na(latitude) & !is.na(longitude)) %>%
+  group_by(site.x) %>%
+  summarise(lat_site = mean(latitude), lon_site = mean(longitude), .groups = "drop")
+
+# Step 2: Left join to bring coordinates to matching NAs
+df_full <- df_full %>%
+  left_join(coord_lookup, by = "site.x") %>%
+  mutate(
+    latitude = if_else(is.na(latitude), lat_site, latitude),
+    longitude = if_else(is.na(longitude), lon_site, longitude)
+  ) %>%
+  select(-lat_site, -lon_site)
+
+df_with_coords <- df_full %>% filter(!is.na(latitude) & !is.na(longitude))
+
+# Get US states geometry
+states <- us_states() %>%
+  filter(!(state_abbr %in% c("PR", "AK", "HI")))
+
+# Plot all points over U.S. map
+ggplot() +
+  geom_sf(data = states, fill = "white", color = "black") +
+  geom_point(data = df_with_coords,
+             aes(x = longitude, y = latitude),
+             color = "blue", size = 1.5) +
+  labs(title = "All Site Locations")
+
+
+#there are many NAs in this dataset. Soils data is incomplete, non-US sites (like the Germany site) do not have weather data, and some sites are missing lat/lon coordinates. This is OK for XGBoost, so we will continue. After this we will run random forest after imputation.
+```
+##XGBoost
+```{r - XGBoost}
+set.seed(626)
+
+
+df_model <- df_full %>%
+  select(-yield_mg_ha, -replicate, -block, -year.x, -site.x, -site_year) # keep year_site
+
+# double check your target is still there!
+glimpse(df_model)
+
+yield_rec <- recipe(yield_mg_ha_adj ~ ., data = df_model) %>%
+  step_zv(all_predictors()) %>%
+  step_integer(all_nominal_predictors()) %>%  # <-- better for high-cardinality
+  step_impute_median(all_numeric_predictors()) %>%
+  step_corr(all_predictors(), threshold = 0.9) %>%
+  step_normalize(all_numeric_predictors())
+
+
+
+boost_spec <- boost_tree(
+  trees = 100,          # lower number of trees
+  tree_depth = 3,       # shallower trees
+  learn_rate = 0.1,     # standard learning rate
+  loss_reduction = 0,
+  sample_size = 0.8,
+  mtry = 0.5
+) %>%
+  set_mode("regression") %>%
+  set_engine("xgboost")
+
+
+xgb_wf <- workflow() %>%
+  add_recipe(yield_rec) %>%
+  add_model(xgb_spec)
+
+folds <- vfold_cv(df_full, v = 5)
+
+doParallel::registerDoParallel()
+
+xgb_results <- tune_race_anova(
+  xgb_wf,
+  resamples = folds,
+  grid = 20,
+  metrics = metric_set(rmse, rsq),
+  control = control_race(verbose_elim = TRUE)
+)
+best_params <- select_best(xgb_results, metric = "rmse")
+
+final_xgb <- finalize_workflow(xgb_wf, best_params)
+
+final_fit <- final_xgb %>% 
+  last_fit(split = initial_split(df_full, prop = 0.8))
+
+collect_metrics(final_fit)
+
+final_model <- extract_fit_parsnip(final_fit)
+vip(final_model$fit)
+
 
 ```
 

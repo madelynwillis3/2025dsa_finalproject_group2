@@ -244,13 +244,13 @@ df_full <- df %>%
 ```{r EDA}
 
 library(stringr)
-# Step 1: Create a lookup table of lat/lon for non-missing coordinates by actual site
+#lat lon coords per site
 coord_lookup <- df_full %>%
   filter(!is.na(latitude) & !is.na(longitude)) %>%
   group_by(site.x) %>%
   summarise(lat_site = mean(latitude), lon_site = mean(longitude), .groups = "drop")
 
-# Step 2: Left join to bring coordinates to matching NAs
+# fill NA sites with coordinates of filled sites
 df_full <- df_full %>%
   left_join(coord_lookup, by = "site.x") %>%
   mutate(
@@ -282,14 +282,13 @@ set.seed(626)
 
 
 df_model <- df_full %>%
-  select(-yield_mg_ha, -replicate, -block, -year.x, -site.x, -site_year) # keep year_site
+  select(-yield_mg_ha, -replicate, -block, -year.x, -site.x, -site_year) 
 
-# double check your target is still there!
 glimpse(df_model)
 
 yield_rec <- recipe(yield_mg_ha_adj ~ ., data = df_model) %>%
   step_zv(all_predictors()) %>%
-  step_integer(all_nominal_predictors()) %>%  # <-- better for high-cardinality
+  step_integer(all_nominal_predictors()) %>%  
   step_impute_median(all_numeric_predictors()) %>%
   step_corr(all_predictors(), threshold = 0.9) %>%
   step_normalize(all_numeric_predictors())
@@ -297,9 +296,9 @@ yield_rec <- recipe(yield_mg_ha_adj ~ ., data = df_model) %>%
 
 
 boost_spec <- boost_tree(
-  trees = 100,          # lower number of trees
-  tree_depth = 3,       # shallower trees
-  learn_rate = 0.1,     # standard learning rate
+  trees = 100,
+  tree_depth = 3,       
+  learn_rate = 0.1,     
   loss_reduction = 0,
   sample_size = 0.8,
   mtry = 0.5

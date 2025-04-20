@@ -340,9 +340,9 @@ xgb_res <- tune_race_anova(
   control = control_race(verbose_elim = TRUE, save_pred = TRUE)
 )
 
-beepr::beep()
-
+write_csv(xgb_res, "../data/xgb_res.csv")
 ```
+
 ```{r - best}
 #rmse
 best_rmse_xgb <- xgb_res %>%
@@ -380,7 +380,7 @@ final_spec_xgb <- boost_tree(
   set_engine("xgboost") %>%
   set_mode("regression")
 
-final_fit_xgb <- last_fit(final_spec,
+final_fit_xgb <- last_fit(final_spec_xgb,
                           df_recipe,
                           split = df_split)
 final_fit %>%

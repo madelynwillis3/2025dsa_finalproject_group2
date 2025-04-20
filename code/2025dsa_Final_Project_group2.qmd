@@ -23,10 +23,11 @@ library(GGally)
 library(tidymodels)
 library(xgboost)
 library(finetune)  # for tune_race_anova
-library(vip) 
+library(vip)
+library(doParallel)
+library(beepr)
+
 ```
-
-
 
 ## 1a. Data Pull
 
@@ -76,46 +77,47 @@ unique_site_years <- train_meta %>%
 
 ```{r - wrangle weather data}
 #gathering data: dropping data that doesn't work within daymet boundaries.
-daymet_all_w <- daymet_all %>%
-  filter(!map_lgl(weather, inherits, "try-error")) %>%
-  unnest(weather, names_sep = "_") %>%
-  group_by(
-    site,
-    year,
-    yday = weather_yday,
-    weather_measurement,
-    latitude = weather_latitude,
-    longitude = weather_longitude,
-    altitude = weather_altitude
-  ) %>%
-  summarise(
-    value = mean(weather_value, na.rm = TRUE),
-    .groups = "drop"
-  ) %>%
-  pivot_wider(
-    names_from = weather_measurement,
-    values_from = value
-  ) %>%
-  clean_names()
- 
- daymet_all_w %>%
-  # Selecting needed variables
-  dplyr::select(year, site, latitude, longitude,
-                yday,
-                dayl.s = dayl_s, 
-                prcp.mm = prcp_mm_day,
-                srad.wm2 = srad_w_m_2, 
-                tmax.c = tmax_deg_c, 
-                tmin.c = tmin_deg_c,
-                vp.pa = vp_pa
-                ) 
-
-write.csv(daymet_all_w, "../data/training/training_weather.csv")
-
+# daymet_all_w <- daymet_all %>%
+#   filter(!map_lgl(weather, inherits, "try-error")) %>%
+#   unnest(weather, names_sep = "_") %>%
+#   group_by(
+#     site,
+#     year,
+#     yday = weather_yday,
+#     weather_measurement,
+#     latitude = weather_latitude,
+#     longitude = weather_longitude,
+#     altitude = weather_altitude
+#   ) %>%
+#   summarise(
+#     value = mean(weather_value, na.rm = TRUE),
+#     .groups = "drop"
+#   ) %>%
+#   pivot_wider(
+#     names_from = weather_measurement,
+#     values_from = value
+#   ) %>%
+#   clean_names()
+#  
+#  daymet_all_w %>%
+#   # Selecting needed variables
+#   dplyr::select(year, site, latitude, longitude,
+#                 yday,
+#                 dayl.s = dayl_s, 
+#                 prcp.mm = prcp_mm_day,
+#                 srad.wm2 = srad_w_m_2, 
+#                 tmax.c = tmax_deg_c, 
+#                 tmin.c = tmin_deg_c,
+#                 vp.pa = vp_pa
+#                 ) 
+# 
+# write.csv(daymet_all_w, "../data/training/training_weather.csv")
+# 
 
 ```
 
 ## 2. Feature Engineering
+
 ```{r - fe weather}
 training_weather<- read.csv("../data/training/training_weather.csv")
 
@@ -169,10 +171,6 @@ write_csv(training_weather_wide, "../data/training/training_weather_monthsum.csv
 
 
 ```
-
-
-
-
 
 ```{r - combine datasets}
 #combining data frames:
@@ -240,7 +238,6 @@ df_full <- df %>%
 
 ```
 
-
 ```{r EDA}
 
 library(stringr)
@@ -266,76 +263,142 @@ states <- us_states() %>%
   filter(!(state_abbr %in% c("PR", "AK", "HI")))
 
 # Plot all points over U.S. map
-ggplot() +
-  geom_sf(data = states, fill = "white", color = "black") +
-  geom_point(data = df_with_coords,
-             aes(x = longitude, y = latitude),
-             color = "blue", size = 1.5) +
-  labs(title = "All Site Locations")
+# ggplot() +
+#   geom_sf(data = states, fill = "white", color = "black") +
+#   geom_point(data = df_with_coords,
+#              aes(x = longitude, y = latitude),
+#              color = "blue", size = 1.5) +
+#   labs(title = "All Site Locations")
 
 
 #there are many NAs in this dataset. Soils data is incomplete, non-US sites (like the Germany site) do not have weather data, and some sites are missing lat/lon coordinates. This is OK for XGBoost, so we will continue. After this we will run random forest after imputation.
 ```
-##XGBoost
-```{r - XGBoost}
+
+## XGBoost
+```{r}
+
+
+
 set.seed(626)
 
-
+#clean up:
 df_model <- df_full %>%
-  select(-yield_mg_ha, -replicate, -block, -year.x, -site.x, -site_year) 
+  select(-replicate, -block, -year.x, -site.x, -site_year, -yield_mg_ha)
 
-glimpse(df_model)
+#split:
+df_split <- initial_split(df_model, prop = 0.7, strata = yield_mg_ha_adj)
+df_training <- training(df_split)
+df_testing  <- testing(df_split)
 
-yield_rec <- recipe(yield_mg_ha_adj ~ ., data = df_model) %>%
-  step_zv(all_predictors()) %>%
-  step_integer(all_nominal_predictors()) %>%  
+#plot test vs train:
+ggplot() + 
+  geom_density(data = df_training, aes(x = yield_mg_ha_adj), color = "red") +
+  geom_density(data = df_testing, aes(x = yield_mg_ha_adj), color = "blue")
+
+#recipe:
+df_recipe <- recipe(yield_mg_ha_adj ~ ., data = df_training) %>%
+  step_nzv(all_predictors()) %>%
   step_impute_median(all_numeric_predictors()) %>%
-  step_corr(all_predictors(), threshold = 0.9) %>%
-  step_normalize(all_numeric_predictors())
+  step_other(all_nominal_predictors(), threshold = 0.01) %>%  # collapse rare hybrid levels
+  step_dummy(all_nominal_predictors(), one_hot = TRUE)
 
-
-
-boost_spec <- boost_tree(
-  trees = 100,
-  tree_depth = 3,       
-  learn_rate = 0.1,     
-  loss_reduction = 0,
-  sample_size = 0.8,
-  mtry = 0.5
+#specify xgb params:
+xgb_spec <- boost_tree(
+  trees = tune(),
+  tree_depth = tune(),
+  min_n = tune(),
+  learn_rate = tune()
 ) %>%
-  set_mode("regression") %>%
-  set_engine("xgboost")
+  set_engine("xgboost") %>%
+  set_mode("regression")
 
+#workflow:
+xgb_workflow <- workflow() %>%
+  add_model(xgb_spec) %>%
+  add_recipe(df_recipe)
 
-xgb_wf <- workflow() %>%
-  add_recipe(yield_rec) %>%
-  add_model(xgb_spec)
+#set folds to 10
+resampling_foldcv <- vfold_cv(df_training, v = 10)
 
-folds <- vfold_cv(df_full, v = 5)
-
-doParallel::registerDoParallel()
-
-xgb_results <- tune_race_anova(
-  xgb_wf,
-  resamples = folds,
-  grid = 20,
-  metrics = metric_set(rmse, rsq),
-  control = control_race(verbose_elim = TRUE)
+#grid
+xgb_grid <- grid_latin_hypercube(
+  tree_depth(),
+  min_n(),
+  learn_rate(),
+  trees(),
+  size = 25  # 25, since 50 doesn't work on my laptop
 )
-best_params <- select_best(xgb_results, metric = "rmse")
 
-final_xgb <- finalize_workflow(xgb_wf, best_params)
+registerDoFuture()
+plan(multisession, workers = 4)  # reduce to 2-4 if hitting memory issues
 
-final_fit <- final_xgb %>% 
-  last_fit(split = initial_split(df_full, prop = 0.8))
 
-collect_metrics(final_fit)
+xgb_res <- tune_race_anova(
+  object = xgb_workflow,
+  resamples = resampling_foldcv,
+  grid = xgb_grid,
+  control = control_race(verbose_elim = TRUE, save_pred = TRUE)
+)
 
-final_model <- extract_fit_parsnip(final_fit)
-vip(final_model$fit)
-
+beepr::beep()
 
 ```
+```{r - best}
+#rmse
+best_rmse_xgb <- xgb_res %>%
+  select_best(metric = "rmse") %>%
+  mutate(source = "best_rmse_xgb")
+best_rmse_xgb
+
+#r2
+best_r2_xgb <- xgb_res %>%
+  select_best(metric = "rsq") %>%
+  mutate(source = "best_r2_xgb")
+best_r2_xgb
+#pct loss
+best_rmse_pct_loss_xgb <- xgb_res %>%
+  select_by_pct_loss("min_n",
+                     metric = "rmse",
+                     limit = 1) %>%
+  mutate(source = "best_rmse_pct_loss_xgb")
+best_rmse_pct_loss_xgb
+#rmse based on 1 std error:
+best_rmse_one_std_err_xgb <- xgb_res %>%
+  select_by_one_std_err(metric = "rmse",
+                        eval_time = 100,
+                        trees) %>%
+  mutate(source = "best_rmse_one_std_err_xgb")
+best_rmse_one_std_err_xgb
+```
+
+```{r final run}
+final_spec_xgb <- boost_tree(
+  trees = best_r2_xgb$trees,
+  tree_depth = best_r2_xgb$tree_depth,
+  min_n = best_r2_xgb$min_n,
+  learn_rate = best_r2_xgb$learn_rate) %>%
+  set_engine("xgboost") %>%
+  set_mode("regression")
+
+final_fit_xgb <- last_fit(final_spec,
+                          df_recipe,
+                          split = df_split)
+final_fit %>%
+  collect_predictions() %>%
+  ggplot(aes(x = yield_mg_ha_adj,
+                              y = .pred)) + 
+  geom_point() +
+  geom_abline() + 
+  geom_smooth(method = "lm") + 
+  scale_x_continuous(limits = C(20,40)) +
+  scale_y_continuous(limit = c(20,40)) 
+
+```
+
+
+
+
+
 
 
 

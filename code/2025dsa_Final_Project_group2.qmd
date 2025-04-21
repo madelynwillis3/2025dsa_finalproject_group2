@@ -317,7 +317,7 @@ write_csv(df_model, "../data/df_model.csv")
 ## XGBoost
 ```{r}
 
-
+#STILL NOT WORKING:
 set.seed(626)
 options(future.globals.maxSize = 10 * 1024^3)  # 10GB
 
@@ -450,7 +450,6 @@ final_fit %>%
 ## Random Forest
 ```{r RF}
 
-# Optional: Enable parallel processing
 registerDoParallel()
 
 # split
@@ -460,56 +459,59 @@ df_train <- training(df_split)
 df_test  <- testing(df_split)
 
 # recipe:
-df_recipe <- recipe(yield_mg_ha ~ ., data = df_train) %>%                   # Replace with column names to drop
-  step_naomit(all_predictors(), all_outcomes()) %>%  # Drop rows with NA
-  step_zv(all_predictors())                          # Remove zero variance predictors
+df_recipe <- recipe(yield_mg_ha ~ ., data = df_train) %>% 
+  step_naomit(all_predictors(), all_outcomes()) %>%  # Drop NA rows
+  step_zv(all_predictors())                          # not sure if necessary
 
-# 3. Define model spec
-rf_spec <- rand_forest(mtry = tune(), trees = tune(), min_n = 5) %>%
+
+rf_spec <- rand_forest(
+  mtry = tune(), 
+  trees = tune(), 
+  min_n = 5) %>%
   set_engine("ranger", importance = "permutation") %>%
   set_mode("regression")
 
-# 4. Create CV folds
+#folds set to 5 because any more won't run
 set.seed(34549)
 cv_folds <- vfold_cv(df_train, v = 5)
 
-# 5. Tune model with simulated annealing
+#Tuning:
 set.seed(76544)
 rf_tuned <- tune_sim_anneal(
-  object = rf_spec,
-  preprocessor = df_recipe,
-  resamples = cv_folds,
-  iter = 50
-)
+            object = rf_spec,
+            preprocessor = df_recipe,
+            resamples = cv_folds,
+            iter = 50
+          )
+
 beepr::beep("wilhelm")
-# 6. Plot tuning results
+#results!
 autoplot(rf_tuned)
 
-# 7. Select best model based on RMSE
+# best one from rmse
 best_model <- select_best(rf_tuned, "rmse")
 
-# 8. Finalize model and workflow
+# final one:
 final_rf <- finalize_model(rf_spec, best_model)
 
 wf <- workflow() %>%
   add_model(final_rf) %>%
   add_recipe(df_recipe)
 
-# 9. Fit finalized model on training data
 final_fit <- fit(wf, data = df_train)
 
-# 10. Visualize variable importance
+# variable importance:
 vip(final_fit$fit$fit)
 
-
+save_rds(rf_tuned, "../output/rf_tuned.rds")
 ```
 ```{r}
 
 # models:
 
-# model_final <- readRDS("xgboost_model.rds")
+# final_rf <- readRDS("xgboost_model.rds")
 
-# df_model <- read_csv("your_processed_data.csv")
+# df_model <- read_csv("../data/df_model.csv")
 
 ui <- fluidPage(
   titlePanel("Modeling Corn Yield"),
@@ -526,7 +528,7 @@ ui <- fluidPage(
         tabPanel("Yield EDA", 
                  plotOutput("eda_yield_plot")),
         tabPanel("Predictor EDA", 
-                 plotOutput("eda_variable_plot")),
+                 plotOutput("eda_variable_plot")), #will work on this later...
         tabPanel("Variable Importance", 
                  plotOutput("vip_plot")),
         tabPanel("Predicted vs Observed", 
@@ -541,7 +543,7 @@ server <- function(input, output) {
   
   # EDA on yield
   output$eda_yield_plot <- renderPlot({
-    ggplot(df_model, aes(x = yield)) +
+    ggplot(df_model, aes(x = yield_mg_ha)) +
       geom_histogram(fill = "steelblue", bins = 30) +
       labs(title = "Distribution of Yield", x = "Yield", y = "Count")
   })
@@ -553,17 +555,17 @@ server <- function(input, output) {
       labs(title = paste("Distribution of", input$variable), x = input$variable, y = "Count")
   })
   
-  # Variable importance plot (replace with your model)
+  # Variable importance plot
   output$vip_plot <- renderPlot({
-    vip(model_final, num_features = 10) +
+    vip(final_fit$fit$fit, num_features = 10) +
       labs(title = "Top 10 Important Variables")
   })
   
-  # Predicted vs observed plot
+  # pred. vs observed plot
   output$pred_obs_plot <- renderPlotly({
     # preds <- predict(model_final, new_data = df_model_test)$.pred
     # actuals <- df_model_test$yield
-    # Replace above with real prediction and observed values
+    # will replace above later
     
     ggplot(df_model_test, aes(x = actual_yield, y = predicted_yield)) +
       geom_point(alpha = 0.7) +
@@ -574,7 +576,7 @@ server <- function(input, output) {
   })
   
   output$metrics <- renderPrint({
-    # Replace with actual results
+    # will replace once one of my models actually works
     rmse_val <- rmse(data = df_model_test, truth = actual_yield, estimate = predicted_yield)
     rsq_val <- rsq(data = df_model_test, truth = actual_yield, estimate = predicted_yield)
     list(RMSE = rmse_val, R2 = rsq_val)

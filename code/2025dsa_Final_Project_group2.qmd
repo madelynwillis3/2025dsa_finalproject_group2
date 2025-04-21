@@ -276,9 +276,6 @@ states <- us_states() %>%
 
 ## XGBoost
 ```{r}
-
-
-
 set.seed(626)
 
 #clean up:
@@ -383,7 +380,7 @@ final_spec_xgb <- boost_tree(
 final_fit_xgb <- last_fit(final_spec_xgb,
                           df_recipe,
                           split = df_split)
-final_fit %>%
+final_fit_xgb %>%
   collect_predictions() %>%
   ggplot(aes(x = yield_mg_ha_adj,
                               y = .pred)) + 
@@ -395,10 +392,134 @@ final_fit %>%
 
 ```
 
+```{r - Random Forest specification}
+set.seed(626)
+library()
+rf_spec <- 
+  # Specifying rf as our model type, asking to tune the hyperparameters
+  rand_forest(trees = tune(),
+              mtry = tune(),
+              ) %>%
+    # Specify the engine
+    set_engine("ranger") %>%
+    # Specifying mode  
+  set_mode("regression")
+rf_spec
+
+# Grid search
+rf_grid_result <- tune_sim_anneal(object = rf_spec,
+                     preprocessor = df_recipe,
+                     resamples = resampling_foldcv,
+                    #param_info = rf_param,
+                    iter = 20
+                     )
+beepr::beep()
+
+rf_grid_result
+# Let's find our number of trees from the lowest RMSE and highest R2
+## Based on RMSE
+rf_grid_result %>%
+  collect_metrics() %>%
+  filter(.metric == "rmse") %>%
+  ggplot(aes(x = mtry, 
+             y = trees 
+             )) +
+  geom_path(group = 1) +
+  geom_point(aes(color = mean),
+             size = 3) + 
+  scale_color_viridis_b() +
+  geom_text(aes(label = .iter), nudge_x = .0005) +
+  labs(title = "RMSE")
+## Based on R2 metric
+rf_grid_result %>%
+  collect_metrics() %>%
+  filter(.metric == "rsq") %>%
+  ggplot(aes(x = mtry, 
+             y = trees 
+             )) +
+  geom_path(group = 1) +
+  geom_point(aes(color = mean),
+             size = 3) + 
+  scale_color_viridis_b() +
+  geom_text(aes(label = .iter), nudge_x = .0005) +
+  labs(title = "R2")
+# Best model based on lowest RMSE
+best_rmse_rf <- rf_grid_result %>%
+  select_by_pct_loss("trees",
+                     metric = "rmse",
+                     limit = 2
+                     
+                     )
+best_rmse_rf
+
+# Based on greatest R2
+best_r2_rf <- rf_grid_result %>%
+  select_by_pct_loss( "trees",
+                      metric = "rsq",
+                      limit = 2
+    
+  )
+best_r2_rf
+```
+
+```{r Random Forest final_spec}
+final_spec_rf <- rand_forest(trees = 443,
+                          mtry = 25) %>%
+  # Specify the engine
+  set_engine("ranger",
+             importance = "permutation"
+             ) %>%
+    # Specifying mode  
+  set_mode("regression")
+final_spec_rf
+```
+
+```{r Random Forest final_fit}
+final_fit_rf <- last_fit(final_spec_rf,
+                df_recipe,
+                split = df_split)
+
+final_fit_rf %>%
+  collect_predictions()
+```
+
+Metrics on the **test set**:
+```{r Random Forest fit on test set}
+final_fit_rf %>%
+  collect_metrics()
+```
+
+Predicted vs. observed plot:  
+```{r - Predicted vs. observed plot }
+final_fit_rf %>%
+  collect_predictions() %>%
+  ggplot(aes(x = yield_mg_ha_adj,
+             y = .pred)) +
+  geom_point() +
+  geom_abline() +
+  geom_smooth(method = "lm") +
+  scale_x_continuous(limits = c(20, 40)) +
+  scale_y_continuous(limits = c(20, 40)) 
+```
 
 
-
-
+```{r - Permutation evaluation}
+df_prep <- df_recipe %>%
+  prep()
+final_spec %>%
+  fit(yield_mg_ha_adj ~ .,
+         data = bake(df_prep, df_model)) %>%
+    vi() %>%
+  mutate(
+    Variable = fct_reorder(Variable, 
+                           Importance)
+  ) %>%
+  ggplot(aes(x = Importance, 
+             y = Variable)) +
+  geom_col() +
+  scale_x_continuous(expand = c(0, 0)) +
+  labs(y = NULL)
+```
 
 
 

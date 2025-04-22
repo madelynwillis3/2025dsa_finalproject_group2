@@ -349,7 +349,8 @@ ggplot() +
 df_recipe <- recipe(yield_mg_ha ~ ., data = df_training) %>%
   step_nzv(all_predictors()) %>%
   step_impute_median(all_numeric_predictors()) %>%
-  step_dummy(all_nominal_predictors(), one_hot = TRUE)
+  step_dummy(all_nominal_predictors(), one_hot = TRUE) %>%
+  step_other(all_nominal_predictors(), threshold = 0.01)
 
 
 #hyperparameter tune

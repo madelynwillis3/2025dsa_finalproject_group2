@@ -12,7 +12,7 @@ author: Madelyn Willis, Charles Appolon
 
 ```{r - load packages, warning = FALSE}
 library(tidyverse)
-library(USAboundaries) # for US state boundaries
+library(USA.state.boundaries) # for US state boundaries
 library(sf) # for US map
 library(daymetr)
 library(dplyr)
@@ -316,11 +316,10 @@ write_csv(df_model, "../data/df_model.csv")
 
 ## XGBoost
 ```{r}
-<<<<<<< HEAD
-=======
+
 
 #STILL NOT WORKING:
->>>>>>> 57b6e3b6a1dd580d67f378cd3979565e7e0c0338
+
 set.seed(626)
 options(future.globals.maxSize = 10 * 1024^3)  # 10GB
 
@@ -458,7 +457,7 @@ final_fit_xgb %>%
 ## Random Forest
 ```{r RF}
 
-registerDoParallel()
+registerDoParallel(cores = parallel::detectCores()-1)
 
 # split
 set.seed(123)

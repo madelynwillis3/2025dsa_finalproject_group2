@@ -873,7 +873,6 @@ baked_test_data <- baked_test_data %>%
     month_planted = NA_character_,
     month_harvested = NA_character_
   )
-
 # Step 1: Predict yield using the trained workflow
 predictions <- predict(trained_workflow, baked_test_data)
 

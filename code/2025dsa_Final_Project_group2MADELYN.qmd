@@ -1,0 +1,1056 @@
+---
+title: "2025dsa_Final_Project_group2"
+format: html
+  html:
+    embed-resources: true
+    toc: true
+    theme: cerulean
+author: Madelyn Willis, Charles Appolon
+---
+
+## 1. Packages
+
+```{r - load packages, warning = FALSE}
+library(tidyverse)
+library(USAboundaries) # for US state boundaries
+library(sf) # for US map
+library(daymetr)
+library(dplyr)
+library(purrr)
+library(janitor)
+library(ggridges)
+library(GGally)
+library(tidymodels)
+library(xgboost)
+library(finetune)  # for tune_race_anova
+library(vip)
+library(doParallel)
+library(beepr)
+library(doFuture)
+library(ranger)
+library(plotly)
+library(shiny)
+```
+
+## 1a. Data Pull
+
+```{r - train data pull}
+
+clean_site_names <- function(site_col) { #to clean names
+  site_col %>%
+    # remove replicates like IAH1a
+    gsub("([A-Z]+\\d+)\\w?$", "\\1", .) %>%
+    # remove rep numbers and spaces
+    gsub("-? ?rep \\d+$", "", .) %>%
+    # Remove dry early and late
+    gsub("- ?(Dry|Early|Late)$", "", .)
+}
+
+#meta:
+train_meta <- read.csv("../data/training/training_meta.csv") %>%
+  mutate(site = clean_site_names(site))
+train_meta$year_site <- paste0(train_meta$site, "_", train_meta$year)
+#does not have TXH4
+
+#trait:
+train_trait <- read.csv("../data/training/training_trait.csv") %>%
+  mutate(site = clean_site_names(site))
+
+#soil:
+# train_soil <- read.csv("../data/training/training_soil.csv")
+# train_soil <- train_soil %>%
+#   mutate(year_site = train_soil$site)
+# #does not have 2014
+
+train_soil <- read.csv("../data/training/training_soil.csv") %>%
+  mutate(
+    year_site = site,
+    year_site = gsub("_(\\d+)_", "_", year_site)
+  ) %>%
+  select(-c(year, site))
+
+train_soil_avg <- train_soil %>%
+  group_by(year_site) %>%
+  summarise(across(where(is.numeric), mean, na.rm = TRUE), .groups = "drop") %>%
+  ungroup() 
+
+
+train_trait$year_site <- paste0(train_trait$site, "_", train_trait$year)
+
+
+
+train_meta_reduced <- train_meta %>%
+  group_by(year_site) %>%
+  summarise(
+    latitude = mean(latitude), 
+    longitude = mean(longitude),
+    previous_crop = first(previous_crop),
+    year = first(year),
+    site = first(site),
+    .groups = "drop"
+  )
+
+# # Pull weather data only once per site
+# daymet_all <- train_meta_reduced %>%
+#   mutate(weather = pmap(list(.y = year,
+#                              .site = site,
+#                              .lat = latitude,
+#                              .lon = longitude),
+#                         function(.y, .site, .lat, .lon)
+#                           try({
+#                             download_daymet(
+#                               site = .site,
+#                               lat = .lat,
+#                               lon = .lon,
+#                               start = .y,
+#                               end = .y,
+#                               simplify = TRUE,
+#                               silent = TRUE
+#                             ) })))
+
+
+
+
+train_trait <- left_join(train_trait, train_meta_reduced, by = "year_site")
+
+train_trait$previous_crop <- as.factor(train_trait$previous_crop)
+
+
+
+df <- left_join(train_trait, train_soil_avg, by = "year_site")
+
+
+na.omit(df[1:15])
+
+df <- df %>%
+  mutate(previous_crop = tolower(previous_crop)) %>%
+  mutate(previous_crop = case_when(
+           is.na(previous_crop) ~ NA_character_,
+           str_detect(previous_crop, "soy") ~ "soybean",
+           str_detect(previous_crop, "corn") ~ "corn",
+           str_detect(previous_crop, "cotton") ~ "cotton",
+           str_detect(previous_crop, "wheat") ~ "small grain",
+           str_detect(previous_crop, "sorghum") ~ "sorghum",
+           str_detect(previous_crop, "rye") ~ "small grain",
+           str_detect(previous_crop, "peanut") ~ "peanut",
+           str_detect(previous_crop, "beet") ~ "sugar beet",
+           str_detect(previous_crop, "fallow") ~ "fallow",
+           str_detect(previous_crop, "lima bean") ~ "small grain",
+           str_detect(previous_crop, "pumpkin") ~ "soybean/pumpkin", #mixed
+           str_detect(previous_crop, "small grain") ~ "small grain",
+           TRUE ~ "other"  # if theres any other
+         )) %>%
+  mutate(yield_mg_ha = yield_mg_ha * ((100 - grain_moisture) / (100 - 15.5))) %>%
+  filter(!str_detect(year_site, "^GEH|ONH")) 
+
+
+
+
+
+```
+
+## 1b. Data Wrangling
+
+```{r - wrangle weather data}
+#gathering data: dropping data that doesn't work within daymet boundaries.
+# daymet_all_w <- daymet_all %>%
+#   filter(!map_lgl(weather, inherits, "try-error")) %>%
+#   unnest(weather, names_sep = "_") %>%
+#   group_by(
+#     site,
+#     year,
+#     yday = weather_yday,
+#     weather_measurement,
+#     latitude = weather_latitude,
+#     longitude = weather_longitude,
+#     altitude = weather_altitude
+#   ) %>%
+#   summarise(
+#     value = mean(weather_value, na.rm = TRUE),
+#     .groups = "drop"
+#   ) %>%
+#   pivot_wider(
+#     names_from = weather_measurement,
+#     values_from = value
+#   ) %>%
+#   clean_names()
+# 
+#  daymet_all_w %>%
+#   # Selecting needed variables
+#   dplyr::select(year, site, latitude, longitude,
+#                 yday,
+#                 dayl.s = dayl_s,
+#                 prcp.mm = prcp_mm_day,
+#                 srad.wm2 = srad_w_m_2,
+#                 tmax.c = tmax_deg_c,
+#                 tmin.c = tmin_deg_c,
+#                 vp.pa = vp_pa
+#                 )
+# 
+# write.csv(daymet_all_w, "../data/training/training_weather.csv")
+
+
+```
+
+## 2. Feature Engineering
+
+```{r - fe weather}
+training_weather<- read.csv("../data/training/training_weather.csv")
+
+training_weather %>%
+  pivot_longer(cols = dayl_s:vp_pa) %>%
+  ggplot(aes(x = value)) + 
+  geom_density() +
+  facet_wrap(.~name, scales = "free")
+
+
+training_weather <- training_weather %>%
+  mutate(date_chr = paste0(year, "/", yday)) %>%
+  mutate(date = as.Date(date_chr,"%Y/%j")) %>%
+  mutate(month = month(date)) %>%
+  mutate(month_abb = format(date, "%b"))
+
+training_weather_fe <- training_weather %>%
+  group_by(year, site, month, month_abb) %>%  # include month_abb here
+  summarise(
+    across(.cols = c(dayl_s, srad_w_m_2, tmax_deg_c, tmin_deg_c, vp_pa),
+           .fns = mean,
+           .names = "mean_{.col}"),
+    across(.cols = prcp_mm_day,
+           .fns = sum,
+           .names = "sum_{.col}")
+  ) %>%
+  ungroup()
+
+
+training_weather_wide <- training_weather_fe %>%
+  filter(month >= 3 & month <= 10) %>% #filtering by planting to harvest months 
+  pivot_longer(cols = mean_dayl_s:sum_prcp_mm_day) %>%
+  mutate(varname = paste0(name, "_", month_abb)) %>%
+  dplyr::select(-name, -month_abb) %>%
+  pivot_wider(names_from = varname,
+              values_from = value) %>%
+  mutate(across(c(4:50), ~round(.,1)))
+
+# ggplot(data = training_weather_fe,
+#        aes(x = mean_tmax_deg_c,
+#            y = month_abb,
+#            fill = stat(x))) +
+#   geom_density_ridges_gradient(scale = 3,
+#                                rel_min_height = 0.01) +
+#   scale_fill_viridis_c(option = "D") + 
+#   theme(legend.position = "none")
+
+write_csv(training_weather_wide, "../data/training/training_weather_monthsum.csv")
+
+
+
+
+```
+
+
+
+```{r}
+
+training_weather_wide <- read_csv("../data/training/training_weather_monthsum.csv")
+# Add site_year
+training_weather_wide <- training_weather_wide %>%
+  mutate(year_site = paste0(site, "_", year))
+
+
+# summarize weather to 1 row per year_site
+training_weather_wide_summary <- training_weather_wide %>%
+  select(-month) %>%  # exclude 'month' before summarizing
+  group_by(year_site) %>%
+  summarise(across(where(is.numeric), mean, na.rm = TRUE), .groups = "drop")
+
+
+# join weather and df
+df_full <- df %>%
+  left_join(training_weather_wide_summary, by = "year_site") %>%
+ # select(-c("year.x", "previous_crop", "year.y")) %>%
+  mutate(year_site = gsub("TXH1-(Dry|Early|Late)", "TXH1", year_site))
+
+
+```
+
+```{r EDA}
+
+library(stringr)
+#lat lon coords per site
+coord_lookup <- df_full %>%
+  filter(!is.na(latitude) & !is.na(longitude)) %>%
+  group_by(site.x) %>%
+  summarise(lat_site = mean(latitude), lon_site = mean(longitude), .groups = "drop")
+
+# fill NA sites with coordinates of filled sites
+df_full <- df_full %>%
+  left_join(coord_lookup, by = "site.x") %>%
+  mutate(
+    latitude = if_else(is.na(latitude), lat_site, latitude),
+    longitude = if_else(is.na(longitude), lon_site, longitude)
+  ) %>%
+  select(-lat_site, -lon_site)
+
+df_with_coords <- df_full %>% filter(!is.na(latitude) & !is.na(longitude))
+
+# Get US states geometry
+states <- us_states() %>%
+  filter(!(state_abbr %in% c("PR", "AK", "HI")))
+
+# Plot all points over U.S. map
+# ggplot() +
+#   geom_sf(data = states, fill = "white", color = "black") +
+#   geom_point(data = df_with_coords,
+#              aes(x = longitude, y = latitude),
+#              color = "blue", size = 1.5) +
+#   labs(title = "All Site Locations")
+
+# Clean up and process the data
+df_model <- df_full %>%
+  # Extract the month from date_planted and date_harvested
+  mutate(
+    month_planted = sub("^([0-9]+)/.*", "\\1", date_planted), # Extract the month from date_planted
+    month_harvested = sub("^([0-9]+)/.*", "\\1", date_harvested), # Extract the month from date_harvested
+    days_difference = as.numeric(as.Date(date_harvested, format = "%m/%d/%y") - as.Date(date_planted, format = "%m/%d/%y"))
+  ) %>%
+  # Remove unwanted columns
+  select(
+    -replicate, -block, -year.y, -site.y, -year.x, -site.x,
+    -grain_moisture, -year, -date_planted, -date_harvested, -year_site
+  ) %>%
+ #remove all NAs in data:
+  filter(!is.na(month_harvested))
+
+# Write the resulting data frame to a CSV file
+write_csv(df_model, "../data/df_model.csv")
+#there are many NAs in this dataset. Soils data is incomplete, non-US sites (like the Germany site) do not have weather data, and some sites are missing lat/lon coordinates. This is OK for XGBoost, so we will continue. After this we will run random forest after imputation.
+```
+
+## XGBoost
+```{r, eval = FALSE}
+
+#STILL NOT WORKING:
+set.seed(626)
+options(future.globals.maxSize = 10 * 1024^3)  # 10GB
+
+# registerDoFuture()
+# plan(multisession, workers = 2)  # Adjust workers based on RAM
+# # split
+set.seed(123)
+df_split <- initial_split(df_model, prop = 0.7, strata = yield_mg_ha)
+df_train <- training(df_split)
+df_test  <- testing(df_split)
+
+# get categorical columns
+<<<<<<< HEAD
+cat_cols <- df_train %>%
+=======
+cat_cols <- df_model %>%
+>>>>>>> df1b0fb07625f1fde66123f24546054e0630f883
+  select(where(is.factor)) %>%
+  names()
+
+# collapse rare levels in categorical vars (threshold: <5% of total)
+<<<<<<< HEAD
+df_train <- df_train %>%
+=======
+df_model <- df_model %>%
+>>>>>>> df1b0fb07625f1fde66123f24546054e0630f883
+  mutate(across(all_of(cat_cols), ~ fct_lump_prop(.x, prop = 0.05)))  # 5% threshold
+
+# apply same levels to testing set to avoid new levels issue
+df_test <- df_test %>%
+  mutate(across(all_of(cat_cols), ~ fct_lump_prop(.x, prop = 0.05))) %>%
+<<<<<<< HEAD
+  mutate(across(all_of(cat_cols), ~ factor(.x, levels = levels(df_train[[cur_column()]]))))
+
+#plot test vs train:
+ggplot() +
+  geom_density(data = df_train, aes(x = yield_mg_ha), color = "red") +
+  geom_density(data = df_test, aes(x = yield_mg_ha), color = "blue")
+
+
+#recipe:
+df_recipe <- recipe(yield_mg_ha ~ ., data = df_train) %>%
+  step_novel() %>%
+  step_unknown(all_nominal_predictors()) %>%
+  step_other(all_nominal_predictors(), threshold = 0.001) %>%
+  step_dummy(all_nominal_predictors()) %>%
+=======
+  mutate(across(all_of(cat_cols), ~ factor(.x, levels = levels(df_model[[cur_column()]]))))
+
+#plot test vs train:
+ggplot() +
+  geom_density(data = df_model, aes(x = yield_mg_ha), color = "red") +
+  geom_density(data = df_model, aes(x = yield_mg_ha), color = "blue")
+
+
+#recipe:
+df_recipe <- recipe(yield_mg_ha ~ ., data = df_model) %>%
+>>>>>>> df1b0fb07625f1fde66123f24546054e0630f883
+  step_nzv(all_predictors()) %>%
+  step_impute_median(all_numeric_predictors())
+
+df_bake <- df_recipe %>%
+  prep() %>%
+  bake(new_data = NULL)%>%
+  select(-ends_with("_other")) #other columns are not useful.
+
+
+xgb_spec <- boost_tree(
+  trees = 100,         # Fixed number of trees
+  tree_depth = 5,      # Fixed tree depth
+  min_n = 10,          # Fixed minimum number of observations
+  learn_rate = 0.1     # Fixed learning rate
+) %>%
+  set_engine("xgboost") %>%
+  set_mode("regression")
+
+xgb_workflow <- workflow() %>%
+  add_model(xgb_spec) %>%
+  add_recipe(df_recipe)
+
+xgb_fit <- fit(xgb_workflow, data = df_train)
+#set folds to 5
+resampling_foldcv <- vfold_cv(df_train, v = 5)
+
+# Create a tuning grid containing only `trees`
+xgb_grid <- grid_latin_hypercube(
+  trees(range = c(50, 200)),
+  size = 4 
+)
+
+
+
+
+
+# Set up parallel processing
+cl <- makeCluster(6)  # Adjust the number of cores based on your system
+registerDoParallel(cl)
+
+start_x <- Sys.time()
+# Tune the model
+xgb_res <- tune_grid(
+  object = xgb_workflow,
+  resamples = resampling_foldcv,
+  grid = xgb_grid,
+  control = control_race(verbose_elim = TRUE, save_pred = TRUE)
+)
+
+stopCluster(cl)  # Stop the cluster after tuning
+end_x <- Sys.time()
+
+start_x - end_x
+```
+
+<<<<<<< HEAD
+```{r}
+library(tidymodels)
+library(doParallel)
+
+set.seed(123)
+df_split <- initial_split(df_model, prop = 0.7, strata = yield_mg_ha)
+df_train <- training(df_split)
+df_test  <- testing(df_split)
+
+#recipe:
+df_recipe <- recipe(yield_mg_ha ~ ., data = df_train) %>%
+  # Handle new levels explicitly
+  step_novel(all_nominal_predictors()) %>%
+  
+  # Handle unknown levels
+  step_unknown(all_nominal_predictors()) %>%
+  
+  # Group infrequent levels into "other"
+  step_other(all_nominal_predictors(), threshold = 0.001) %>%
+  
+  # One-hot encode nominal predictors
+  step_dummy(all_nominal_predictors()) %>%
+  
+  # Remove near-zero variance predictors
+  step_nzv(all_predictors()) %>%
+  
+  # Impute missing values for numeric predictors
+  step_impute_median(all_numeric_predictors())
+
+df_bake <- df_recipe %>%
+  prep() %>%
+  bake(new_data = NULL)%>%
+  select(-ends_with("_other")) #other columns are not useful.
+
+
+# Define the XGBoost model with fixed hyperparameters
+xgb_spec <- boost_tree(
+  trees = tune(),          # Tuning the number of trees
+  tree_depth = 5,          # Fixed tree depth
+  min_n = 10,              # Fixed minimum number of observations
+  learn_rate = 0.1         # Fixed learning rate
+=======
+```{r 1 model test:}
+library(tidymodels)
+library(xgboost)
+library(tictoc)  # for timing
+
+# Setup parallel backend in case XGBoost uses it
+library(doParallel)
+registerDoParallel(cores = 2)
+
+# Optional: clean rare levels again on full dataset
+cat_cols <- df_model %>%
+  select(where(is.factor)) %>%
+  names()
+
+df_model <- df_model %>%
+  mutate(across(all_of(cat_cols), ~ fct_lump_prop(.x, prop = 0.05)))
+
+# Preprocessing recipe
+full_recipe <- recipe(yield_mg_ha ~ ., data = df_model) %>%
+  step_nzv(all_predictors()) %>%
+  step_impute_median(all_numeric_predictors()) %>%
+  step_unknown(all_nominal_predictors()) %>%        # <-- NEW
+  step_dummy(all_nominal_predictors(), one_hot = TRUE)
+
+summary(df_model)  # check for NAs
+sapply(df_model, function(x) sum(is.na(x)))  # quick NA count
+
+
+# Default model spec — you can tweak these if you want
+xgb_default_spec <- boost_tree(
+  trees = 100,
+  tree_depth = 5,
+  min_n = 10,
+  learn_rate = 0.1
+>>>>>>> df1b0fb07625f1fde66123f24546054e0630f883
+) %>%
+  set_engine("xgboost") %>%
+  set_mode("regression")
+
+<<<<<<< HEAD
+# Create the workflow
+xgb_workflow <- workflow() %>%
+  add_model(xgb_spec) %>%
+  add_recipe(df_recipe)
+
+# Create 5-fold cross-validation
+resampling_foldcv <- vfold_cv(df_train, v = 5)
+
+# Create a tuning grid for `trees`
+xgb_grid <- grid_latin_hypercube(
+  trees(range = c(50, 200)),
+  size = 4 
+)
+
+# Set up parallel processing
+# cl <- makeCluster(6)  # Adjust the number of cores to match your system
+# registerDoParallel(cl)
+
+# Start timing
+start_x <- Sys.time()
+
+# Tune the model
+xgb_res <- tune_grid(
+  object = xgb_workflow,
+  resamples = resampling_foldcv,
+  grid = xgb_grid,
+  control = control_race(verbose = TRUE, save_pred = TRUE)
+)
+
+# # Stop the cluster after tuning
+# stopCluster(cl)
+
+# End timing
+end_x <- Sys.time()
+
+# Calculate elapsed time
+elapsed_time <- end_x - start_x
+print(elapsed_time)
+=======
+# Combine into workflow
+xgb_default_workflow <- workflow() %>%
+  add_recipe(full_recipe) %>%
+  add_model(xgb_default_spec)
+registerDoParallel(cores = parallel::detectCores()-1)
+# ⏱️ Time it
+tic("Fitting XGBoost on full data (no tuning)")
+xgb_default_fit <- fit(xgb_default_workflow, data = df_model)
+toc()
+
+>>>>>>> df1b0fb07625f1fde66123f24546054e0630f883
+```
+
+
+```{r - best}
+#rmse
+best_rmse_xgb <- xgb_res %>%
+  select_best(metric = "rmse") %>%
+  mutate(source = "best_rmse_xgb")
+best_rmse_xgb
+
+#r2
+best_r2_xgb <- xgb_res %>%
+  select_best(metric = "rsq") %>%
+  mutate(source = "best_r2_xgb")
+best_r2_xgb
+#pct loss
+best_rmse_pct_loss_xgb <- xgb_res %>%
+  select_by_pct_loss("min_n",
+                     metric = "rmse",
+                     limit = 1) %>%
+  mutate(source = "best_rmse_pct_loss_xgb")
+best_rmse_pct_loss_xgb
+#rmse based on 1 std error:
+best_rmse_one_std_err_xgb <- xgb_res %>%
+  select_by_one_std_err(metric = "rmse",
+                        eval_time = 100,
+                        trees) %>%
+  mutate(source = "best_rmse_one_std_err_xgb")
+best_rmse_one_std_err_xgb
+```
+
+
+```{r final run}
+# Extract the best parameters from the tuning results
+best_params <- xgb_res %>%
+  select_best(metric = "rmse")
+print(best_params)
+
+# Update the XGBoost model with the best parameters
+final_spec_xgb <- boost_tree(
+  trees = best_params$trees,
+  tree_depth = best_params$tree_depth,
+  min_n = best_params$min_n,
+  learn_rate = best_params$learn_rate
+) %>%
+  set_engine("xgboost") %>%
+  set_mode("regression")
+
+xgb_final_workflow <- finalize_workflow(xgb_workflow, best_params)
+
+# Fit the finalized workflow to the training data
+trained_workflow <- fit(
+  xgb_final_workflow,
+  data = df_train)
+
+xgb_results <- predict(trained_workflow, df_test) %>%
+  bind_cols(df_test) %>%
+  select(yield_mg_ha, .pred) %>%
+  mutate(
+    rmse = sqrt(mean((yield_mg_ha - .pred)^2)),
+    rsq = cor(yield_mg_ha, .pred)^2,
+    pct_loss = (rmse / mean(yield_mg_ha)) * 100
+  )
+#need to add R2 and RMSE to this GRAPH  
+ggplot(xgb_results, aes(x = df_test$yield_mg_ha, y = .pred)) +
+  geom_point() +
+  geom_abline(slope = 1, intercept = 0, color = "red", linetype = "dashed") +
+  geom_smooth(method = "lm", color = "blue") +
+  labs(
+    title = "Actual vs Predicted Yield",
+    x = "Actual Yield (yield_mg_ha)",
+    y = "Predicted Yield"
+  ) +
+  theme_minimal()
+
+write_csv(xgb_results, "../data/xgb_results.csv")
+```
+
+
+###testing
+```{r - xgb test submission}
+
+clean_site_names <- function(site_col) { #to clean names
+  site_col %>%
+    # remove replicates like IAH1a
+    gsub("([A-Z]+\\d+)\\w?$", "\\1", .) %>%
+    # remove rep numbers and spaces
+    gsub("-? ?rep \\d+$", "", .) %>%
+    # Remove dry early and late
+    gsub("- ?(Dry|Early|Late)$", "", .)
+}
+
+#meta:
+test_meta <- read.csv("../data/testing/testing_meta.csv") %>%
+  mutate(site = clean_site_names(site))
+test_meta$year_site <- paste0(test_meta$site, "_", test_meta$year)
+#does not have TXH4
+
+#trait:
+test_trait <- read.csv("../data/testing/testing_submission.csv") %>%
+  mutate(site = clean_site_names(site))
+
+#soil:
+
+test_soil <- read.csv("../data/testing/testing_soil.csv") %>%
+  mutate(
+    year_site = site,
+    year_site = gsub("_(\\d+)_", "_", year_site)
+  ) %>%
+  select(-c(year, site))
+
+test_soil_avg <- test_soil %>%
+  group_by(year_site) %>%
+  summarise(across(where(is.numeric), mean, na.rm = TRUE), .groups = "drop") %>%
+  ungroup() 
+
+
+test_trait$year_site <- paste0(test_trait$site, "_", test_trait$year)
+
+
+
+test_meta_reduced <- test_meta %>%
+  group_by(year_site) %>%
+  summarise(
+    latitude = mean(latitude), 
+    longitude = mean(longitude),
+    previous_crop = first(previous_crop),
+    year = first(year),
+    site = first(site),
+    .groups = "drop"
+  )
+
+# # Pull weather data only once per site
+daymet_test <- test_meta_reduced %>%
+  mutate(weather = pmap(list(.y = year,
+                             .site = site,
+                             .lat = latitude,
+                             .lon = longitude),
+                        function(.y, .site, .lat, .lon)
+                          try({
+                            download_daymet(
+                              site = .site,
+                              lat = .lat,
+                              lon = .lon,
+                              start = .y,
+                              end = .y,
+                              simplify = TRUE,
+                              silent = TRUE
+                            ) })))
+
+
+
+
+test_trait <- left_join(test_trait, test_meta_reduced, by = "year_site")
+
+test_trait$previous_crop <- as.factor(test_trait$previous_crop)
+
+
+
+df_test <- left_join(test_trait, test_soil_avg, by = "year_site")
+
+
+na.omit(df[1:15])
+
+df_test <- df_test %>%
+  mutate(previous_crop = tolower(previous_crop)) %>%
+  mutate(previous_crop = case_when(
+           is.na(previous_crop) ~ NA_character_,
+           str_detect(previous_crop, "soy") ~ "soybean",
+           str_detect(previous_crop, "corn") ~ "corn",
+           str_detect(previous_crop, "cotton") ~ "cotton",
+           str_detect(previous_crop, "wheat") ~ "small grain",
+           str_detect(previous_crop, "sorghum") ~ "sorghum",
+           str_detect(previous_crop, "rye") ~ "small grain",
+           str_detect(previous_crop, "peanut") ~ "peanut",
+           str_detect(previous_crop, "beet") ~ "sugar beet",
+           str_detect(previous_crop, "fallow") ~ "fallow",
+           str_detect(previous_crop, "lima bean") ~ "small grain",
+           str_detect(previous_crop, "pumpkin") ~ "soybean/pumpkin", #mixed
+           str_detect(previous_crop, "small grain") ~ "small grain",
+           TRUE ~ "other"  # if theres any other
+         )) %>%
+  filter(!str_detect(year_site, "^GEH|ONH")) 
+
+#gathering data: dropping data that doesn't work within daymet boundaries.
+daymet_all_test <- daymet_test %>%
+  filter(!map_lgl(weather, inherits, "try-error")) %>%
+  unnest(weather, names_sep = "_") %>%
+  group_by(
+    site,
+    year,
+    yday = weather_yday,
+    weather_measurement,
+    latitude = weather_latitude,
+    longitude = weather_longitude,
+    altitude = weather_altitude
+  ) %>%
+  summarise(
+    value = mean(weather_value, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  pivot_wider(
+    names_from = weather_measurement,
+    values_from = value
+  ) %>%
+  clean_names()
+
+ daymet_all_test %>%
+  # Selecting needed variables
+  dplyr::select(year, site, latitude, longitude,
+                yday,
+                dayl.s = dayl_s,
+                prcp.mm = prcp_mm_day,
+                srad.wm2 = srad_w_m_2,
+                tmax.c = tmax_deg_c,
+                tmin.c = tmin_deg_c,
+                vp.pa = vp_pa
+                )
+
+daymet_all_test %>%
+  pivot_longer(cols = dayl_s:vp_pa) %>%
+  ggplot(aes(x = value)) + 
+  geom_density() +
+  facet_wrap(.~name, scales = "free")
+
+
+daymet_all_test <- daymet_all_test %>%
+  mutate(date_chr = paste0(year, "/", yday)) %>%
+  mutate(date = as.Date(date_chr,"%Y/%j")) %>%
+  mutate(month = month(date)) %>%
+  mutate(month_abb = format(date, "%b"))
+
+training_weather_fe_test <- daymet_all_test %>%
+  group_by(year, site, month, month_abb) %>%  # include month_abb here
+  summarise(
+    across(.cols = c(dayl_s, srad_w_m_2, tmax_deg_c, tmin_deg_c, vp_pa),
+           .fns = mean,
+           .names = "mean_{.col}"),
+    across(.cols = prcp_mm_day,
+           .fns = sum,
+           .names = "sum_{.col}")
+  ) %>%
+  ungroup()
+
+
+training_weather_wide_test <- training_weather_fe_test %>%
+  filter(month >= 3 & month <= 10) %>% #filtering by planting to harvest months 
+  pivot_longer(cols = mean_dayl_s:sum_prcp_mm_day) %>%
+  mutate(varname = paste0(name, "_", month_abb)) %>%
+  dplyr::select(-name, -month_abb) %>%
+  pivot_wider(names_from = varname,
+              values_from = value) %>%
+  mutate(across(c(4:50), ~round(.,1)))
+
+
+# Add site_year
+training_weather_wide_test <- training_weather_wide_test %>%
+  mutate(year_site = paste0(site, "_", year))
+
+
+# summarize weather to 1 row per year_site
+training_weather_wide_summary_test <- training_weather_wide_test %>%
+  select(-month) %>%  # exclude 'month' before summarizing
+  group_by(year_site) %>%
+  summarise(across(where(is.numeric), mean, na.rm = TRUE), .groups = "drop")
+
+
+# join weather and df
+df_full_test <- df_test %>%
+  left_join(training_weather_wide_summary_test, by = "year_site") %>%
+ # select(-c("year.x", "previous_crop", "year.y")) %>%
+  mutate(year_site = gsub("TXH1-(Dry|Early|Late)", "TXH1", year_site))
+
+library(tidymodels)
+
+# Step 1: Add missing columns with filler values
+df_full_test <- df_full_test %>%
+  mutate(
+    month_planted = NA_character_,   # Assuming this is a character column
+    month_harvested = NA_character_, # Assuming this is a character column
+    days_difference = NA_real_,       # Assuming this is a numeric column
+    hybrid = NA_character_,
+    previous_crop = NA_character_
+  )
+
+# Preprocess the test data using the recipe
+baked_test_data <- prep(df_recipe) %>%
+  bake(new_data = df_full_test)
+
+baked_test_data <- baked_test_data %>%
+  mutate(
+    hybrid = NA_character_,
+    previous_crop = NA_character_,
+    month_planted = NA_character_,
+    month_harvested = NA_character_
+  )
+
+# Step 1: Predict yield using the trained workflow
+predictions <- predict(trained_workflow, baked_test_data)
+
+# Step 2: Add predictions to the `baked_test_data
+baked_test_data <- baked_test_data  %>%
+  bind_cols(baked_test_data) %>%
+  select(yield_mg_ha, .pred) %>%
+  mutate(
+    rmse = sqrt(mean((yield_mg_ha - .pred)^2)),
+    rsq = cor(yield_mg_ha, .pred)^2,
+    pct_loss = (rmse / mean(yield_mg_ha)) * 100 )
+
+# Step 5: Combine predictions with the original test data
+df_full_test_with_preds <- df_full_test %>%
+  mutate(predicted_yield_mg_ha = predictions$.pred)
+
+
+
+# Step 2: Create the plot with annotations
+ggplot(predictions, aes(x = df_test$yield_mg_ha, y = .pred)) +
+  geom_point() +
+  geom_abline(slope = 1, intercept = 0, color = "red", linetype = "dashed") +
+  geom_smooth(method = "lm", color = "blue") +
+  labs(
+    title = "Actual vs Predicted Yield",
+    subtitle = sprintf("RMSE: %.2f, R²: %.2f", rmse, rsq),  # Add RMSE and R² to the subtitle
+    x = "Actual Yield (yield_mg_ha)",
+    y = "Predicted Yield"
+  ) +
+  theme_minimal()
+
+```
+
+
+## Random Forest
+```{r RF}
+
+registerDoParallel()
+
+# split
+set.seed(123)
+df_split <- initial_split(df_model, prop = 0.7, strata = yield_mg_ha)
+df_train <- training(df_split)
+df_test  <- testing(df_split)
+
+# recipe:
+df_recipe <- recipe(yield_mg_ha ~ ., data = df_train) %>% 
+  step_naomit(all_predictors(), all_outcomes()) %>%  # Drop NA rows
+  step_zv(all_predictors())                          # not sure if necessary
+
+
+rf_spec <- rand_forest(
+  mtry = tune(), 
+  trees = tune(), 
+  min_n = 5) %>%
+  set_engine("ranger", importance = "permutation") %>%
+  set_mode("regression")
+
+#folds set to 5 because any more won't run
+set.seed(34549)
+cv_folds <- vfold_cv(df_train, v = 5)
+
+#Tuning:
+set.seed(76544)
+rf_tuned <- tune_race_anova( #change to tune_anova_racing
+            object = rf_spec,
+            preprocessor = df_recipe,
+            resamples = cv_folds,
+            iter = 50
+          )
+
+beepr::beep("wilhelm")
+#results!
+autoplot(rf_tuned)
+
+# best one from rmse
+best_model <- select_best(rf_tuned, "rmse")
+
+# final one:
+final_rf <- finalize_model(rf_spec, best_model)
+
+wf <- workflow() %>%
+  add_model(final_rf) %>%
+  add_recipe(df_recipe)
+
+final_fit <- fit(wf, data = df_train)
+
+# variable importance:
+vip(final_fit$fit$fit)
+
+save_rds(rf_tuned, "../output/rf_tuned.rds")
+```
+
+```{r}
+
+# models:
+
+# final_rf <- readRDS("xgboost_model.rds")
+
+# df_model <- read_csv("../data/df_model.csv")
+
+ui <- fluidPage(
+  titlePanel("Modeling Corn Yield"),
+  
+  sidebarLayout(
+    sidebarPanel(
+      selectInput("variable", "Choose a variable to explore:", 
+                  choices = names(df_model)[-which(names(df_model) == "yield")]),
+      helpText("Select a variable to see its distribution.")
+    ),
+    
+    mainPanel(
+      tabsetPanel(
+        tabPanel("Yield EDA", 
+                 plotOutput("eda_yield_plot")),
+        tabPanel("Predictor EDA", 
+                 plotOutput("eda_variable_plot")), #will work on this later...
+        tabPanel("Variable Importance", 
+                 plotOutput("vip_plot")),
+        tabPanel("Predicted vs Observed", 
+                 plotlyOutput("pred_obs_plot"),
+                 verbatimTextOutput("metrics"))
+      )
+    )
+  )
+)
+
+server <- function(input, output) {
+  
+  # EDA on yield
+  output$eda_yield_plot <- renderPlot({
+    ggplot(df_model, aes(x = yield_mg_ha)) +
+      geom_histogram(fill = "steelblue", bins = 30) +
+      labs(title = "Distribution of Yield", x = "Yield", y = "Count")
+  })
+  
+  # EDA on chosen variable
+  output$eda_variable_plot <- renderPlot({
+    ggplot(df_model, aes_string(x = input$variable)) +
+      geom_histogram(fill = "darkgreen", bins = 30) +
+      labs(title = paste("Distribution of", input$variable), x = input$variable, y = "Count")
+  })
+  
+  # Variable importance plot
+  output$vip_plot <- renderPlot({
+    vip(final_fit$fit$fit, num_features = 10) +
+      labs(title = "Top 10 Important Variables")
+  })
+  
+  # pred. vs observed plot
+  output$pred_obs_plot <- renderPlotly({
+    # preds <- predict(model_final, new_data = df_model_test)$.pred
+    # actuals <- df_model_test$yield
+    # will replace above later
+    
+    ggplot(df_model_test, aes(x = actual_yield, y = predicted_yield)) +
+      geom_point(alpha = 0.7) +
+      geom_abline(slope = 1, intercept = 0, linetype = "dashed") +
+      labs(title = "Predicted vs Observed Yield",
+           x = "Observed Yield", y = "Predicted Yield") +
+      theme_minimal()
+  })
+  
+  output$metrics <- renderPrint({
+    # will replace once one of my models actually works
+    rmse_val <- rmse(data = df_model_test, truth = actual_yield, estimate = predicted_yield)
+    rsq_val <- rsq(data = df_model_test, truth = actual_yield, estimate = predicted_yield)
+    list(RMSE = rmse_val, R2 = rsq_val)
+  })
+  
+}
+
+shinyApp(ui = ui, server = server)
+```
+
+
+
+
+
+

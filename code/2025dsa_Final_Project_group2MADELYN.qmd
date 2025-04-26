@@ -10,7 +10,7 @@ author: Madelyn Willis, Charles Appolon
 
 ## 1. Packages
 
-```{r - load packages, warning = FALSE}
+```{r - load packages, message = FALSE }
 library(tidyverse)
 library(USAboundaries) # for US state boundaries
 library(sf) # for US map
@@ -90,23 +90,23 @@ train_meta_reduced <- train_meta %>%
     .groups = "drop"
   )
 
-# # Pull weather data only once per site
-# daymet_all <- train_meta_reduced %>%
-#   mutate(weather = pmap(list(.y = year,
-#                              .site = site,
-#                              .lat = latitude,
-#                              .lon = longitude),
-#                         function(.y, .site, .lat, .lon)
-#                           try({
-#                             download_daymet(
-#                               site = .site,
-#                               lat = .lat,
-#                               lon = .lon,
-#                               start = .y,
-#                               end = .y,
-#                               simplify = TRUE,
-#                               silent = TRUE
-#                             ) })))
+# Pull weather data only once per site
+daymet_all <- train_meta_reduced %>%
+  mutate(weather = pmap(list(.y = year,
+                             .site = site,
+                             .lat = latitude,
+                             .lon = longitude),
+                        function(.y, .site, .lat, .lon)
+                          try({
+                            download_daymet(
+                              site = .site,
+                              lat = .lat,
+                              lon = .lon,
+                              start = .y,
+                              end = .y,
+                              simplify = TRUE,
+                              silent = TRUE
+                            ) })))
 
 
 
@@ -153,65 +153,66 @@ df <- df %>%
 
 ```{r - wrangle weather data}
 #gathering data: dropping data that doesn't work within daymet boundaries.
-# daymet_all_w <- daymet_all %>%
-#   filter(!map_lgl(weather, inherits, "try-error")) %>%
-#   unnest(weather, names_sep = "_") %>%
-#   group_by(
-#     site,
-#     year,
-#     yday = weather_yday,
-#     weather_measurement,
-#     latitude = weather_latitude,
-#     longitude = weather_longitude,
-#     altitude = weather_altitude
-#   ) %>%
-#   summarise(
-#     value = mean(weather_value, na.rm = TRUE),
-#     .groups = "drop"
-#   ) %>%
-#   pivot_wider(
-#     names_from = weather_measurement,
-#     values_from = value
-#   ) %>%
-#   clean_names()
-# 
-#  daymet_all_w %>%
-#   # Selecting needed variables
-#   dplyr::select(year, site, latitude, longitude,
-#                 yday,
-#                 dayl.s = dayl_s,
-#                 prcp.mm = prcp_mm_day,
-#                 srad.wm2 = srad_w_m_2,
-#                 tmax.c = tmax_deg_c,
-#                 tmin.c = tmin_deg_c,
-#                 vp.pa = vp_pa
-#                 )
-# 
-# write.csv(daymet_all_w, "../data/training/training_weather.csv")
+daymet_all_w <- daymet_all %>%
+  filter(!map_lgl(weather, inherits, "try-error")) %>%
+  unnest(weather, names_sep = "_") %>%
+  group_by(
+    site,
+    year,
+    yday = weather_yday,
+    weather_measurement,
+    latitude = weather_latitude,
+    longitude = weather_longitude,
+    altitude = weather_altitude
+  ) %>%
+  summarise(
+    value = mean(weather_value, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  pivot_wider(
+    names_from = weather_measurement,
+    values_from = value
+  ) %>%
+  clean_names()
+
+ daymet_all_w %>%
+  # Selecting needed variables
+  dplyr::select(year, site, latitude, longitude,
+                yday,
+                dayl.s = dayl_s,
+                prcp.mm = prcp_mm_day,
+                srad.wm2 = srad_w_m_2,
+                tmax.c = tmax_deg_c,
+                tmin.c = tmin_deg_c,
+                vp.pa = vp_pa
+                )
+
+write.csv(daymet_all_w, "../data/training/training_weather.csv")
 
 
 ```
 
 ## 2. Feature Engineering
 
-```{r - fe weather}
+```{r - fe weather, warning = FALSE}
+#pull:
 training_weather<- read.csv("../data/training/training_weather.csv")
-
+#pivot:
 training_weather %>%
   pivot_longer(cols = dayl_s:vp_pa) %>%
   ggplot(aes(x = value)) + 
   geom_density() +
   facet_wrap(.~name, scales = "free")
 
-
+#fixing dates:
 training_weather <- training_weather %>%
   mutate(date_chr = paste0(year, "/", yday)) %>%
   mutate(date = as.Date(date_chr,"%Y/%j")) %>%
   mutate(month = month(date)) %>%
   mutate(month_abb = format(date, "%b"))
-
+#group & summarize by variable
 training_weather_fe <- training_weather %>%
-  group_by(year, site, month, month_abb) %>%  # include month_abb here
+  group_by(year, site, month, month_abb) %>%
   summarise(
     across(.cols = c(dayl_s, srad_w_m_2, tmax_deg_c, tmin_deg_c, vp_pa),
            .fns = mean,
@@ -222,7 +223,7 @@ training_weather_fe <- training_weather %>%
   ) %>%
   ungroup()
 
-
+#filter by active months and clean up:
 training_weather_wide <- training_weather_fe %>%
   filter(month >= 3 & month <= 10) %>% #filtering by planting to harvest months 
   pivot_longer(cols = mean_dayl_s:sum_prcp_mm_day) %>%
@@ -232,15 +233,6 @@ training_weather_wide <- training_weather_fe %>%
               values_from = value) %>%
   mutate(across(c(4:50), ~round(.,1)))
 
-# ggplot(data = training_weather_fe,
-#        aes(x = mean_tmax_deg_c,
-#            y = month_abb,
-#            fill = stat(x))) +
-#   geom_density_ridges_gradient(scale = 3,
-#                                rel_min_height = 0.01) +
-#   scale_fill_viridis_c(option = "D") + 
-#   theme(legend.position = "none")
-
 write_csv(training_weather_wide, "../data/training/training_weather_monthsum.csv")
 
 
@@ -248,17 +240,15 @@ write_csv(training_weather_wide, "../data/training/training_weather_monthsum.csv
 
 ```
 
-
-
 ```{r}
-
+#pull data:
 training_weather_wide <- read_csv("../data/training/training_weather_monthsum.csv")
-# Add site_year
+# Add site_year:
 training_weather_wide <- training_weather_wide %>%
   mutate(year_site = paste0(site, "_", year))
 
 
-# summarize weather to 1 row per year_site
+# summarize weather to 1 row per year_site:
 training_weather_wide_summary <- training_weather_wide %>%
   select(-month) %>%  # exclude 'month' before summarizing
   group_by(year_site) %>%
@@ -308,7 +298,7 @@ states <- us_states() %>%
 
 # Clean up and process the data
 df_model <- df_full %>%
-  # Extract the month from date_planted and date_harvested
+  # Extract the month from date_planted and date_harvested. This is to maintain month in the final model without it being a date format.
   mutate(
     month_planted = sub("^([0-9]+)/.*", "\\1", date_planted), # Extract the month from date_planted
     month_harvested = sub("^([0-9]+)/.*", "\\1", date_harvested), # Extract the month from date_harvested
@@ -327,15 +317,13 @@ write_csv(df_model, "../data/df_model.csv")
 #there are many NAs in this dataset. Soils data is incomplete, non-US sites (like the Germany site) do not have weather data, and some sites are missing lat/lon coordinates. This is OK for XGBoost, so we will continue. After this we will run random forest after imputation.
 ```
 
-## XGBoost
 ```{r, eval = FALSE}
 
 #STILL NOT WORKING:
 set.seed(626)
 options(future.globals.maxSize = 10 * 1024^3)  # 10GB
 
-# registerDoFuture()
-# plan(multisession, workers = 2)  # Adjust workers based on RAM
+
 # # split
 set.seed(123)
 df_split <- initial_split(df_model, prop = 0.7, strata = yield_mg_ha)
@@ -343,26 +331,23 @@ df_train <- training(df_split)
 df_test  <- testing(df_split)
 
 # get categorical columns
-<<<<<<< HEAD
-cat_cols <- df_train %>%
-=======
+
+# cat_cols <- df_train %>%
+
 cat_cols <- df_model %>%
->>>>>>> df1b0fb07625f1fde66123f24546054e0630f883
   select(where(is.factor)) %>%
   names()
 
 # collapse rare levels in categorical vars (threshold: <5% of total)
-<<<<<<< HEAD
+
 df_train <- df_train %>%
-=======
+
 df_model <- df_model %>%
->>>>>>> df1b0fb07625f1fde66123f24546054e0630f883
   mutate(across(all_of(cat_cols), ~ fct_lump_prop(.x, prop = 0.05)))  # 5% threshold
 
 # apply same levels to testing set to avoid new levels issue
 df_test <- df_test %>%
   mutate(across(all_of(cat_cols), ~ fct_lump_prop(.x, prop = 0.05))) %>%
-<<<<<<< HEAD
   mutate(across(all_of(cat_cols), ~ factor(.x, levels = levels(df_train[[cur_column()]]))))
 
 #plot test vs train:
@@ -377,7 +362,6 @@ df_recipe <- recipe(yield_mg_ha ~ ., data = df_train) %>%
   step_unknown(all_nominal_predictors()) %>%
   step_other(all_nominal_predictors(), threshold = 0.001) %>%
   step_dummy(all_nominal_predictors()) %>%
-=======
   mutate(across(all_of(cat_cols), ~ factor(.x, levels = levels(df_model[[cur_column()]]))))
 
 #plot test vs train:
@@ -388,7 +372,7 @@ ggplot() +
 
 #recipe:
 df_recipe <- recipe(yield_mg_ha ~ ., data = df_model) %>%
->>>>>>> df1b0fb07625f1fde66123f24546054e0630f883
+
   step_nzv(all_predictors()) %>%
   step_impute_median(all_numeric_predictors())
 
@@ -444,89 +428,49 @@ end_x <- Sys.time()
 start_x - end_x
 ```
 
-<<<<<<< HEAD
+## 3. Preprocessing
+
 ```{r}
+# Load required libraries
 library(tidymodels)
 library(doParallel)
 
+# Set seed for reproducibility
 set.seed(123)
+
+# Split the data
 df_split <- initial_split(df_model, prop = 0.7, strata = yield_mg_ha)
-df_train <- training(df_split)
-df_test  <- testing(df_split)
+df_train <- training(df_split) %>%
+  select(-c(month_planted, month_harvested, days_difference))
+df_test <- testing(df_split)
 
-#recipe:
+# Define the recipe for preprocessing
 df_recipe <- recipe(yield_mg_ha ~ ., data = df_train) %>%
-  # Handle new levels explicitly
-  step_novel(all_nominal_predictors()) %>%
-  
-  # Handle unknown levels
-  step_unknown(all_nominal_predictors()) %>%
-  
-  # Group infrequent levels into "other"
-  step_other(all_nominal_predictors(), threshold = 0.001) %>%
-  
-  # One-hot encode nominal predictors
-  step_dummy(all_nominal_predictors()) %>%
-  
-  # Remove near-zero variance predictors
-  step_nzv(all_predictors()) %>%
-  
-  # Impute missing values for numeric predictors
-  step_impute_median(all_numeric_predictors())
+  #step_rm(c(month_planted, month_harvested, days_difference)) %>% # Remove unwanted columns
+  step_novel(all_nominal_predictors()) %>%         # Handle new levels explicitly
+  step_unknown(all_nominal_predictors()) %>%      # Handle unknown levels
+  step_other(all_nominal_predictors(), threshold = 0.001) %>% # Group infrequent levels
+  step_dummy(all_nominal_predictors()) %>%        # One-hot encode nominal predictors
+  step_nzv(all_predictors()) %>%                  # Remove near-zero variance predictors
+  step_impute_median(all_numeric_predictors())     # Impute missing numeric values
+prep(df_recipe) %>% # Prepare the recipe
+bake(new_data = NULL) %>% # Apply the recipe to the training data
+  select(-ends_with("_other")) # Remove "_other" columns
+```
 
-df_bake <- df_recipe %>%
-  prep() %>%
-  bake(new_data = NULL)%>%
-  select(-ends_with("_other")) #other columns are not useful.
+## 4. XGBoost
 
-
-# Define the XGBoost model with fixed hyperparameters
+```{r}
+# Define the XGBoost model with tunable hyperparameters
 xgb_spec <- boost_tree(
-  trees = tune(),          # Tuning the number of trees
+  trees = tune(),          # Number of trees to tune
   tree_depth = 5,          # Fixed tree depth
   min_n = 10,              # Fixed minimum number of observations
   learn_rate = 0.1         # Fixed learning rate
-=======
-```{r 1 model test:}
-library(tidymodels)
-library(xgboost)
-library(tictoc)  # for timing
-
-# Setup parallel backend in case XGBoost uses it
-library(doParallel)
-registerDoParallel(cores = 2)
-
-# Optional: clean rare levels again on full dataset
-cat_cols <- df_model %>%
-  select(where(is.factor)) %>%
-  names()
-
-df_model <- df_model %>%
-  mutate(across(all_of(cat_cols), ~ fct_lump_prop(.x, prop = 0.05)))
-
-# Preprocessing recipe
-full_recipe <- recipe(yield_mg_ha ~ ., data = df_model) %>%
-  step_nzv(all_predictors()) %>%
-  step_impute_median(all_numeric_predictors()) %>%
-  step_unknown(all_nominal_predictors()) %>%        # <-- NEW
-  step_dummy(all_nominal_predictors(), one_hot = TRUE)
-
-summary(df_model)  # check for NAs
-sapply(df_model, function(x) sum(is.na(x)))  # quick NA count
-
-
-# Default model spec — you can tweak these if you want
-xgb_default_spec <- boost_tree(
-  trees = 100,
-  tree_depth = 5,
-  min_n = 10,
-  learn_rate = 0.1
->>>>>>> df1b0fb07625f1fde66123f24546054e0630f883
 ) %>%
   set_engine("xgboost") %>%
   set_mode("regression")
 
-<<<<<<< HEAD
 # Create the workflow
 xgb_workflow <- workflow() %>%
   add_model(xgb_spec) %>%
@@ -535,18 +479,16 @@ xgb_workflow <- workflow() %>%
 # Create 5-fold cross-validation
 resampling_foldcv <- vfold_cv(df_train, v = 5)
 
-# Create a tuning grid for `trees`
+# Create a tuning grid for the number of trees
 xgb_grid <- grid_latin_hypercube(
-  trees(range = c(50, 200)),
-  size = 4 
+  trees(range = c(50, 200)), # Range of trees to tune
+  size = 4                   # Number of grid points
 )
 
-# Set up parallel processing
-# cl <- makeCluster(6)  # Adjust the number of cores to match your system
+# Set up parallel processing (optional but recommended for speeding up the tuning process)
+# num_cores <- parallel::detectCores() - 1
+# cl <- makeCluster(num_cores)
 # registerDoParallel(cl)
-
-# Start timing
-start_x <- Sys.time()
 
 # Tune the model
 xgb_res <- tune_grid(
@@ -555,32 +497,12 @@ xgb_res <- tune_grid(
   grid = xgb_grid,
   control = control_race(verbose = TRUE, save_pred = TRUE)
 )
-
-# # Stop the cluster after tuning
+#save rds:
+saveRDS(xgb_res, "../data/xgb_res.rds")
+# Stop the parallel cluster after tuning
 # stopCluster(cl)
+xgb_res <- readRDS("../data/xgb_res.rds")
 
-# End timing
-end_x <- Sys.time()
-
-# Calculate elapsed time
-elapsed_time <- end_x - start_x
-print(elapsed_time)
-=======
-# Combine into workflow
-xgb_default_workflow <- workflow() %>%
-  add_recipe(full_recipe) %>%
-  add_model(xgb_default_spec)
-registerDoParallel(cores = parallel::detectCores()-1)
-# ⏱️ Time it
-tic("Fitting XGBoost on full data (no tuning)")
-xgb_default_fit <- fit(xgb_default_workflow, data = df_model)
-toc()
-
->>>>>>> df1b0fb07625f1fde66123f24546054e0630f883
-```
-
-
-```{r - best}
 #rmse
 best_rmse_xgb <- xgb_res %>%
   select_best(metric = "rmse") %>%
@@ -606,59 +528,230 @@ best_rmse_one_std_err_xgb <- xgb_res %>%
                         trees) %>%
   mutate(source = "best_rmse_one_std_err_xgb")
 best_rmse_one_std_err_xgb
-```
+#based on this, the rmse one will be chosen, since 3/4 bests are the same model.
 
+# Extract the best hyperparameters from the tuning results
+best_params <- best_rmse_xgb
 
-```{r final run}
-# Extract the best parameters from the tuning results
-best_params <- xgb_res %>%
-  select_best(metric = "rmse")
-print(best_params)
-
-# Update the XGBoost model with the best parameters
-final_spec_xgb <- boost_tree(
+# Finalize the XGBoost specification with the best hyperparameters
+xgb_final_spec <- boost_tree(
   trees = best_params$trees,
-  tree_depth = best_params$tree_depth,
-  min_n = best_params$min_n,
-  learn_rate = best_params$learn_rate
+  tree_depth = 5,
+  min_n = 10,
+  learn_rate = 0.1
 ) %>%
   set_engine("xgboost") %>%
   set_mode("regression")
 
-xgb_final_workflow <- finalize_workflow(xgb_workflow, best_params)
+# Finalize the workflow with the best model
+xgb_final_workflow <- workflow() %>%
+  add_model(xgb_final_spec) %>%
+  add_recipe(df_recipe)
 
-# Fit the finalized workflow to the training data
-trained_workflow <- fit(
-  xgb_final_workflow,
-  data = df_train)
+# Fit the finalized workflow on the full training data
+xgb_final_fit <- fit(xgb_final_workflow, data = df_train)
 
-xgb_results <- predict(trained_workflow, df_test) %>%
+# Evaluate performance on the test set
+test_predictions <- predict(xgb_final_fit, new_data = df_test) %>%
   bind_cols(df_test) %>%
-  select(yield_mg_ha, .pred) %>%
   mutate(
-    rmse = sqrt(mean((yield_mg_ha - .pred)^2)),
-    rsq = cor(yield_mg_ha, .pred)^2,
-    pct_loss = (rmse / mean(yield_mg_ha)) * 100
+    rmse = sqrt(mean((yield_mg_ha - .pred)^2, na.rm = TRUE)),
+    rsq = cor(yield_mg_ha, .pred, use = "complete.obs")^2
   )
-#need to add R2 and RMSE to this GRAPH  
-ggplot(xgb_results, aes(x = df_test$yield_mg_ha, y = .pred)) +
+
+# Print RMSE and R-squared
+test_rmse <- test_predictions$rmse[1]
+test_rsq <- test_predictions$rsq[1]
+cat("Test RMSE:", test_rmse, "\n")
+cat("Test R-squared:", test_rsq, "\n")
+
+# Calculate RMSE and R^2
+rmse <- sqrt(mean((test_predictions$yield_mg_ha - test_predictions$.pred)^2, na.rm = TRUE))
+rsq <- cor(test_predictions$yield_mg_ha, test_predictions$.pred, use = "complete.obs")^2
+
+# Plot actual vs. predicted yield
+library(ggplot2)
+results_xgb<- ggplot(test_predictions, aes(x = yield_mg_ha, y = .pred)) +
   geom_point() +
   geom_abline(slope = 1, intercept = 0, color = "red", linetype = "dashed") +
   geom_smooth(method = "lm", color = "blue") +
   labs(
-    title = "Actual vs Predicted Yield",
-    x = "Actual Yield (yield_mg_ha)",
-    y = "Predicted Yield"
+    title = "Actual vs Predicted Yield (mg/ha)",
+    x = "Actual Yield",
+    y = "XgBoost Predicted Yield"
+  ) +
+  # Add RMSE and R² as text annotations (move up and to the left)
+  annotate(
+    "text",
+    x = max(test_predictions$yield_mg_ha, na.rm = TRUE) * 0.2, # Move to the left (20% of max x-value)
+    y = max(test_predictions$.pred, na.rm = TRUE) * 1.2,       # Move upward (80% of max y-value)
+    label = paste0("RMSE: ", round(rmse, 2), "\nR²: ", round(rsq, 2)),
+    color = "black",
+    size = 4,
+    hjust = 0
   ) +
   theme_minimal()
-
-write_csv(xgb_results, "../data/xgb_results.csv")
+ggsave("../output/xgb_results.png", plot = results_xgb, width = 8, height = 6)
 ```
 
+## 5. Random Forest
 
-###testing
-```{r - xgb test submission}
+```{r}
+num_predictors <- ncol(df_train) - 1  # Exclude the target variable
+typical_mtry <- round(sqrt(num_predictors))
 
+rf_spec <- rand_forest(
+  mtry = 8,  # Fixed typical value
+  trees = tune(),       # Only tune trees
+  min_n = 5
+) %>%
+set_engine("ranger", importance = "permutation") %>%
+set_mode("regression")
+
+# Create 5-fold cross-validation
+cv_folds <- vfold_cv(df_train, v = 5)
+
+# Create a tuning grid for trees
+rf_grid <- grid_regular(
+  trees(range = c(50, 500)),  # Tuning trees from 50 to 500
+  levels = 5                 
+)
+tictoc::tic("rf_tuning")
+# Tune the model using the updated recipe and cross-validation
+rf_tuned <- tune_grid(
+  object = rf_spec,
+  preprocessor = df_recipe,
+  resamples = cv_folds,
+  grid = rf_grid,
+  control = control_race(verbose = TRUE, save_pred = TRUE)
+)
+tictoc::toc()
+# Notify when tuning is complete
+beepr::beep("wilhelm")
+# Save the tuned model results
+saveRDS(rf_tuned, "../output/rf_tuned.rds")
+rf_tuned <- readRDS("../output/rf_tuned.rds")
+# Visualize tuning results
+autoplot(rf_tuned)
+
+best_rmse_rf <- rf_tuned %>%
+  select_best(metric = "rmse") %>%
+  mutate(source = "best_rmse_rf")
+best_rmse_rf
+#r2
+best_r2_rf <- rf_tuned %>%
+  select_best(metric = "rsq") %>%
+  mutate(source = "best_r2_rf")
+best_r2_rf
+#best r2 1 std
+best_r2_one_std_rf <- rf_tuned %>%
+  select_by_one_std_err(metric = "rsq",
+                        eval_time = 100,
+                        trees) %>%
+  mutate(source = "best_r2_one_std_rf")
+best_r2_one_std_rf
+# Select the best model based on RMSE
+#best_model <- select_best(rf_tuned, "rmse")
+best_model <- best_rmse_rf
+# Finalize the random forest model with the best parameters
+final_rf <- finalize_model(rf_spec, best_model)
+
+# Create a workflow with the finalized model and recipe
+wf <- workflow() %>%
+  add_model(final_rf) %>%
+  add_recipe(df_recipe)
+
+# Fit the finalized workflow on the full training data
+final_fit <- fit(wf, data = df_train)
+
+# Evaluate variable importance
+vip(final_fit$fit$fit)
+
+
+
+
+# Evaluate performance on the test set
+test_predictions_rf <- predict(final_fit, new_data = df_test) %>%
+  bind_cols(df_test) %>%
+  mutate(
+    rmse = sqrt(mean((yield_mg_ha - .pred)^2, na.rm = TRUE)),
+    rsq = cor(yield_mg_ha, .pred, use = "complete.obs")^2
+  )
+
+# Print RMSE and R-squared
+test_rmse <- test_predictions_rf$rmse[1]
+test_rsq <- test_predictions_rf$rsq[1]
+cat("Test RMSE:", test_rmse, "\n")
+cat("Test R-squared:", test_rsq, "\n")
+
+# # Calculate RMSE and R^2
+# rmse <- sqrt(mean((test_predictions_rf$yield_mg_ha - test_predictions_rf$.pred)^2, na.rm = TRUE))
+# rsq <- cor(test_predictions_rf$yield_mg_ha, test_predictions_rf$.pred, use = "complete.obs")^2
+
+# Plot actual vs. predicted yield
+library(ggplot2)
+results_rf <- ggplot(test_predictions_rf, aes(x = yield_mg_ha, y = .pred)) +
+  geom_point() +
+  geom_abline(slope = 1, intercept = 0, color = "red", linetype = "dashed") +
+  geom_smooth(method = "lm", color = "blue") +
+  labs(
+    title = "Actual vs Predicted Yield (mg/ha)",
+    x = "Actual Yield",
+    y = "Random Forest Predicted Yield"
+  ) +
+  # Add RMSE and R² as text annotations (move up and to the left)
+  annotate(
+    "text",
+    x = max(test_predictions_rf$yield_mg_ha, na.rm = TRUE) * 0.2, # Move to the left (20% of max x-value)
+    y = max(test_predictions_rf$.pred, na.rm = TRUE) * 1.2,       # Move upward (80% of max y-value)
+    label = paste0("RMSE: ", round(rmse, 2), "\nR²: ", round(rsq, 2)),
+    color = "black",
+    size = 4,
+    hjust = 0
+  ) +
+  theme_minimal()
+ggsave("../output/rf_results.png", plot = results_rf, width = 8, height = 6)
+```
+
+## 6. Variable Importance
+
+```{r Variable Importance}
+prep<- prep(df_recipe)
+
+#rf variabe importance
+final_rf_plot <- final_rf %>%
+  fit(yield_mg_ha ~ ., data = bake(prep, new_data = df_train)) %>%
+  vi() %>%
+  mutate(Variable = fct_reorder(Variable, Importance)) %>%
+  ggplot(aes(x = Importance, y = Variable)) +
+  geom_col() +
+  scale_x_continuous(expand = c(0, 0)) +
+  labs(y = NULL)
+#save as object:
+
+ggsave("../output/variable_importance_rf.png", plot = final_rf_plot, width = 8, height = 6, dpi = 300)
+
+
+# XGBoost variable importance
+xgb_final_spec %>%
+  fit(yield_mg_ha ~ ., data = bake(prep, new_data = df_train)) %>%
+  vi() %>%
+  mutate(Variable = fct_reorder(Variable, Importance)) %>%
+  ggplot(aes(x = Importance, y = Variable)) +
+  geom_col() +
+  scale_x_continuous(expand = c(0, 0)) +
+  labs(y = NULL)
+
+ggsave("../output/variable_importance_xgb.png", width = 8, height = 6, dpi = 300)
+```
+
+## 7. Predicting on Test Data
+
+```{r - xgb on test data}
+
+
+
+#NOT WORKING AT BOTTOM
 clean_site_names <- function(site_col) { #to clean names
   site_col %>%
     # remove replicates like IAH1a
@@ -850,206 +943,46 @@ df_full_test <- df_test %>%
  # select(-c("year.x", "previous_crop", "year.y")) %>%
   mutate(year_site = gsub("TXH1-(Dry|Early|Late)", "TXH1", year_site))
 
-library(tidymodels)
-
-# Step 1: Add missing columns with filler values
-df_full_test <- df_full_test %>%
-  mutate(
-    month_planted = NA_character_,   # Assuming this is a character column
-    month_harvested = NA_character_, # Assuming this is a character column
-    days_difference = NA_real_,       # Assuming this is a numeric column
-    hybrid = NA_character_,
-    previous_crop = NA_character_
-  )
-
-# Preprocess the test data using the recipe
-baked_test_data <- prep(df_recipe) %>%
-  bake(new_data = df_full_test)
-
-baked_test_data <- baked_test_data %>%
-  mutate(
-    hybrid = NA_character_,
-    previous_crop = NA_character_,
-    month_planted = NA_character_,
-    month_harvested = NA_character_
-  )
-# Step 1: Predict yield using the trained workflow
-predictions <- predict(trained_workflow, baked_test_data)
-
-# Step 2: Add predictions to the `baked_test_data
-baked_test_data <- baked_test_data  %>%
-  bind_cols(baked_test_data) %>%
-  select(yield_mg_ha, .pred) %>%
-  mutate(
-    rmse = sqrt(mean((yield_mg_ha - .pred)^2)),
-    rsq = cor(yield_mg_ha, .pred)^2,
-    pct_loss = (rmse / mean(yield_mg_ha)) * 100 )
-
-# Step 5: Combine predictions with the original test data
-df_full_test_with_preds <- df_full_test %>%
-  mutate(predicted_yield_mg_ha = predictions$.pred)
+baked_df_test <- prep(df_recipe) %>% # Prepare the recipe
+bake(new_data = df_full_test) %>% # Apply the recipe to the training data
+  select(-ends_with("_other")) # Remove "_other" columns
 
 
 
-# Step 2: Create the plot with annotations
-ggplot(predictions, aes(x = df_test$yield_mg_ha, y = .pred)) +
-  geom_point() +
-  geom_abline(slope = 1, intercept = 0, color = "red", linetype = "dashed") +
-  geom_smooth(method = "lm", color = "blue") +
-  labs(
-    title = "Actual vs Predicted Yield",
-    subtitle = sprintf("RMSE: %.2f, R²: %.2f", rmse, rsq),  # Add RMSE and R² to the subtitle
-    x = "Actual Yield (yield_mg_ha)",
-    y = "Predicted Yield"
-  ) +
-  theme_minimal()
+# populate predictions
+test_sub <- read_csv("../data/testing/testing_submission.csv")
+predictions <- predict(xgb_final_workflow, df_full_test) %>%
+  bind_cols(df_test) 
+predictions <- predictions %>%
+  mutate(yield_mg_ha = .pred) %>%
+  mutate(year = year.x) %>%
+  mutate(site = site.x)
+test_sub_updated <- test_sub %>%
+  left_join(predictions %>% select(year, site, hybrid, yield_mg_ha), 
+            by = c("year", "site", "hybrid")) %>%# Populate `yield` column with `yield_mg_ha`
+  select(-yield_mg_ha.x) %>%
+  mutate(yield_mg_ha = yield_mg_ha.y) %>%
+  select(-yield_mg_ha.y)
+
+# Write the updated submission file:
+write_csv(test_sub_updated, "../output/testing_submission_xgb_WILLIS.csv")
+
+#RF:
+# populate predictions
+
+predictions_rf <- predict(final_fit, df_full_test) %>%
+  bind_cols(df_test) 
+predictions_rf <- predictions_rf %>%
+  mutate(yield_mg_ha = .pred) %>%
+  mutate(year = year.x) %>%
+  mutate(site = site.x)
+test_sub_updated_rf <- test_sub %>%
+  left_join(predictions_rf %>% select(year, site, hybrid, yield_mg_ha), 
+            by = c("year", "site", "hybrid")) %>%# Populate `yield` column with `yield_mg_ha`
+  select(-yield_mg_ha.x) %>%
+  mutate(yield_mg_ha = yield_mg_ha.y) %>%
+  select(-yield_mg_ha.y)
+
+write_csv(test_sub_updated_rf, "../output/testing_submission_rf_WILLIS.csv")
 
 ```
-
-
-## Random Forest
-```{r RF}
-
-registerDoParallel()
-
-# split
-set.seed(123)
-df_split <- initial_split(df_model, prop = 0.7, strata = yield_mg_ha)
-df_train <- training(df_split)
-df_test  <- testing(df_split)
-
-# recipe:
-df_recipe <- recipe(yield_mg_ha ~ ., data = df_train) %>% 
-  step_naomit(all_predictors(), all_outcomes()) %>%  # Drop NA rows
-  step_zv(all_predictors())                          # not sure if necessary
-
-
-rf_spec <- rand_forest(
-  mtry = tune(), 
-  trees = tune(), 
-  min_n = 5) %>%
-  set_engine("ranger", importance = "permutation") %>%
-  set_mode("regression")
-
-#folds set to 5 because any more won't run
-set.seed(34549)
-cv_folds <- vfold_cv(df_train, v = 5)
-
-#Tuning:
-set.seed(76544)
-rf_tuned <- tune_race_anova( #change to tune_anova_racing
-            object = rf_spec,
-            preprocessor = df_recipe,
-            resamples = cv_folds,
-            iter = 50
-          )
-
-beepr::beep("wilhelm")
-#results!
-autoplot(rf_tuned)
-
-# best one from rmse
-best_model <- select_best(rf_tuned, "rmse")
-
-# final one:
-final_rf <- finalize_model(rf_spec, best_model)
-
-wf <- workflow() %>%
-  add_model(final_rf) %>%
-  add_recipe(df_recipe)
-
-final_fit <- fit(wf, data = df_train)
-
-# variable importance:
-vip(final_fit$fit$fit)
-
-save_rds(rf_tuned, "../output/rf_tuned.rds")
-```
-
-```{r}
-
-# models:
-
-# final_rf <- readRDS("xgboost_model.rds")
-
-# df_model <- read_csv("../data/df_model.csv")
-
-ui <- fluidPage(
-  titlePanel("Modeling Corn Yield"),
-  
-  sidebarLayout(
-    sidebarPanel(
-      selectInput("variable", "Choose a variable to explore:", 
-                  choices = names(df_model)[-which(names(df_model) == "yield")]),
-      helpText("Select a variable to see its distribution.")
-    ),
-    
-    mainPanel(
-      tabsetPanel(
-        tabPanel("Yield EDA", 
-                 plotOutput("eda_yield_plot")),
-        tabPanel("Predictor EDA", 
-                 plotOutput("eda_variable_plot")), #will work on this later...
-        tabPanel("Variable Importance", 
-                 plotOutput("vip_plot")),
-        tabPanel("Predicted vs Observed", 
-                 plotlyOutput("pred_obs_plot"),
-                 verbatimTextOutput("metrics"))
-      )
-    )
-  )
-)
-
-server <- function(input, output) {
-  
-  # EDA on yield
-  output$eda_yield_plot <- renderPlot({
-    ggplot(df_model, aes(x = yield_mg_ha)) +
-      geom_histogram(fill = "steelblue", bins = 30) +
-      labs(title = "Distribution of Yield", x = "Yield", y = "Count")
-  })
-  
-  # EDA on chosen variable
-  output$eda_variable_plot <- renderPlot({
-    ggplot(df_model, aes_string(x = input$variable)) +
-      geom_histogram(fill = "darkgreen", bins = 30) +
-      labs(title = paste("Distribution of", input$variable), x = input$variable, y = "Count")
-  })
-  
-  # Variable importance plot
-  output$vip_plot <- renderPlot({
-    vip(final_fit$fit$fit, num_features = 10) +
-      labs(title = "Top 10 Important Variables")
-  })
-  
-  # pred. vs observed plot
-  output$pred_obs_plot <- renderPlotly({
-    # preds <- predict(model_final, new_data = df_model_test)$.pred
-    # actuals <- df_model_test$yield
-    # will replace above later
-    
-    ggplot(df_model_test, aes(x = actual_yield, y = predicted_yield)) +
-      geom_point(alpha = 0.7) +
-      geom_abline(slope = 1, intercept = 0, linetype = "dashed") +
-      labs(title = "Predicted vs Observed Yield",
-           x = "Observed Yield", y = "Predicted Yield") +
-      theme_minimal()
-  })
-  
-  output$metrics <- renderPrint({
-    # will replace once one of my models actually works
-    rmse_val <- rmse(data = df_model_test, truth = actual_yield, estimate = predicted_yield)
-    rsq_val <- rsq(data = df_model_test, truth = actual_yield, estimate = predicted_yield)
-    list(RMSE = rmse_val, R2 = rsq_val)
-  })
-  
-}
-
-shinyApp(ui = ui, server = server)
-```
-
-
-
-
-
-

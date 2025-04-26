@@ -379,6 +379,7 @@ xgb_res <- tune_grid(
   control = control_race(verbose = TRUE, save_pred = TRUE)
 )
 #save rds: (backup)
+saveRDS(xgb_res, "../output/xgb_res.rds")
 xgb_res <- readRDS("../output/xgb_res.rds")
 
 #rmse

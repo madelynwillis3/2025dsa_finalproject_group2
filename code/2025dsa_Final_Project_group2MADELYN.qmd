@@ -238,7 +238,7 @@ write_csv(training_weather_wide, "../data/training/training_weather_monthsum.csv
 
 ```
 
-```{r - Join weather and df}
+```{r - Join weather and df, message= FALSE, warning = FALSE}
 #pull data:
 training_weather_wide <- read_csv("../data/training/training_weather_monthsum.csv")
 # Add site_year:
